@@ -10,8 +10,8 @@ Personal project for scraping Apple Music curated content for analyzing needs.
 - Rooms
 - Track listings and metadata
 
-** Disclaimer
-**This project is for educational and personal use only. 
+** Disclaimer**
+This project is for educational and personal use only. 
 - Not affiliated with Apple Inc.
 - Not intended for commercial use
 - Data is scraped from publicly available Apple Music web pages
