@@ -6,23 +6,14 @@ const { spawn } = require('child_process');
 
 /**
  * ============================================================
- * Apple Music US Crawler + Artist Pipeline (Full File)
+ * Apple Music US Crawler + Artist Pipeline
  * ============================================================
- *
- * Includes:
- *  - Depth-1 split into 3 workers
- *  - Depth-2 split into 9 workers (3x3)
- *  - MAX_DEPTH = 2 for non-artist crawl
- *  - MAX_QUEUE_SIZE = 10000
- *  - Apple Music / Artist filtering rule
- *  - MAX_SUBPAGES_PER_ARTIST = 1
- *  - Scroll max halved (25)
- *  - Robust navigation with safeGoto (domcontentloaded + fallback load)
- *  - Album no-retry rule on hard failure
- *  - Lower per-worker parallel pressure (PARALLEL_PER_BROWSER = 2)
- *  - Better logging with worker label in metrics
- *  - Throttle detection + requeue handoff
- *  - Heartbeats + streamed child logs
+ * - Keeps high concurrency (PARALLEL_PER_BROWSER = 5)
+ * - Test cap: max 25 pages crawled per crawl worker
+ * - Artist/Apple Music subtitle filtering rule
+ * - safeGoto with album no-retry on hard fail
+ * - Throttle detection + requeue handoff
+ * - Worker-labeled metrics
  */
 
 const SEED_URLS = [
@@ -38,7 +29,6 @@ const MANDATORY_ARTISTS = [
   { name: 'SAILORR', url: 'https://music.apple.com/us/artist/sailorr/1741604584' },
 ];
 
-// Keep your complete list in production
 const TOP_ARTISTS = [
   'Bruno Mars', 'Bad Bunny', 'The Weeknd', 'Rihanna', 'Taylor Swift',
   'Justin Bieber', 'Lady Gaga', 'Coldplay', 'Billie Eilish', 'Drake',
@@ -48,15 +38,15 @@ const TOP_ARTISTS = [
 
 const MAX_DEPTH = 2;
 const DEPTH1_SPLITS = 3;
-const DEPTH2_SPLITS_PER_DEPTH1 = 3; // total depth2 workers = 9
-const MAX_PAGES_TO_CRAWL = 25; // test cap per crawl worker
+const DEPTH2_SPLITS_PER_DEPTH1 = 3;
 
 const ARTIST_WORKERS = 12;
 const MAX_BROWSERS = 10;
-const PARALLEL_PER_BROWSER = 2; // lowered for stability/rate-limit mitigation
+const PARALLEL_PER_BROWSER = 5; // as requested (no lowering)
 const TOTAL_TASK_LOOPS = MAX_BROWSERS * PARALLEL_PER_BROWSER;
 
-const MAX_QUEUE_SIZE = 50;
+const MAX_PAGES_TO_CRAWL = 25; // test cap per crawl worker
+const MAX_QUEUE_SIZE = 10000;
 const MAX_TRACKS_PER_ITEM = 500;
 const MAX_SUBPAGES_PER_ARTIST = 1;
 const PAGE_TIMEOUT = 45000;
@@ -64,7 +54,6 @@ const DELAY_BETWEEN_PAGES = 120;
 const HEARTBEAT_MS = 30000;
 const NAV_RETRY_BACKOFF_MS = 1200;
 
-// throttle detection / handoff
 const THROTTLE_WINDOW_SIZE = 60;
 const THROTTLE_FAIL_THRESHOLD = 0.75;
 const THROTTLE_MIN_ATTEMPTS = 30;
@@ -160,7 +149,6 @@ function isAppleMusicSubtitle(subtitle = '') {
   return subtitle.toLowerCase().includes('apple music');
 }
 function shouldKeepPage(type, subtitle) {
-  // strict rule requested earlier
   return type === 'artist' || isAppleMusicSubtitle(subtitle || '');
 }
 
@@ -177,7 +165,7 @@ function startHeartbeat(label, getSnapshot) {
 }
 
 function createThrottleTracker() {
-  const results = []; // true=success, false=fail
+  const results = [];
   return {
     record(ok) {
       results.push(!!ok);
@@ -200,20 +188,17 @@ function createThrottleTracker() {
 async function safeGoto(page, url, timeout = PAGE_TIMEOUT) {
   const kind = classifyUrl(url);
 
-  // attempt 1: fast
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
     if (String(page.url()).startsWith('chrome-error://')) throw new Error('chrome-error-page');
     return { ok: true, reason: 'ok-domcontentloaded' };
   } catch (e1) {
-    // album no-retry rule
     if (kind === 'album') {
       console.error(`safeGoto failed ${url}: ${e1.message} (album no-retry)`);
       return { ok: false, reason: 'album-no-retry-fail' };
     }
   }
 
-  // attempt 2: fallback for non-album
   await page.waitForTimeout(NAV_RETRY_BACKOFF_MS + Math.floor(Math.random() * 800));
   try {
     await page.goto(url, { waitUntil: 'load', timeout: timeout + 10000 });
@@ -239,7 +224,6 @@ async function scrollUntilExhausted(page, direction = 'vertical') {
         for (const c of containers) c.scrollBy({ left: 450, behavior: 'smooth' });
         window.scrollBy({ left: 450, top: 0, behavior: 'smooth' });
       }
-
       await new Promise(r => setTimeout(r, delay));
       const cur = dir === 'vertical' ? window.scrollY : window.scrollX;
       if (cur === last) {
@@ -248,7 +232,6 @@ async function scrollUntilExhausted(page, direction = 'vertical') {
       } else same = 0;
       last = cur;
     }
-
     if (dir === 'vertical') window.scrollTo(0, 0);
   }, direction);
 }
@@ -386,7 +369,7 @@ async function crawlPage(page, url) {
       };
     }
 
-    await page.waitForTimeout(1200); // settle dynamic content
+    await page.waitForTimeout(1200);
     await scrollUntilExhausted(page, 'vertical');
     await scrollUntilExhausted(page, 'horizontal');
 
@@ -417,15 +400,11 @@ async function closeBrowserPool(pool) {
 
 async function processPageTask(task, browser, state) {
   const { url, depth } = task;
-  if (!url || state.visited.has(url)) {
-    return { processed: false, links: [], tracksCount: 0, subtitle: '', depth, navOk: true };
-  }
+  if (!url || state.visited.has(url)) return { processed: false, links: [], tracksCount: 0, subtitle: '', depth, navOk: true };
   state.visited.add(url);
 
   const t = detectType(url);
-  if (t === 'song' || t === 'radio') {
-    return { processed: false, links: [], tracksCount: 0, subtitle: '', depth, navOk: true };
-  }
+  if (t === 'song' || t === 'radio') return { processed: false, links: [], tracksCount: 0, subtitle: '', depth, navOk: true };
 
   const page = await browser.newPage();
   try {
@@ -472,41 +451,23 @@ async function processPageTask(task, browser, state) {
   }
 }
 
-async function loop(browserIndex) {
-  const browser = browsers[browserIndex];
-  while (true) {
-    if (throttled) break;
-    if (pageCount >= MAX_PAGES_TO_CRAWL) break; // cap
+async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
+  const queue = [...initialQueue];
+  let pageCount = 0;
+  let globalAttempts = 0;
+  let throttled = false;
 
-    const task = await takeTask();
-    if (!task) break;
+  const throttleTracker = createThrottleTracker();
 
-    try {
-      const r = await processPageTask(task, browser, state);
-      if (r.processed) pageCount += 1;
-
-      globalAttempts += 1;
-      throttleTracker.record(!!r.navOk);
-
-      for (const nl of r.links || []) {
-        if (!state.visited.has(nl.url) && queue.length < MAX_QUEUE_SIZE) queue.push(nl);
-      }
-
-      await addMetrics(r);
-      if (pageCount > 0 && pageCount % 10 === 0) await flushMetrics(false);
-
-      if (throttleTracker.isThrottled(globalAttempts) && queue.length > 0) {
-        throttled = true;
-        const sc = throttleTracker.score();
-        console.error(`[${workerLabel}] THROTTLED detected. failRate=${sc.failRate.toFixed(3)} attemptsWindow=${sc.attempts} globalAttempts=${globalAttempts}. Will requeue remaining ${queue.length} tasks.`);
-        break;
-      }
-    } catch (e) {
-      console.error(`[${workerLabel}] task error: ${e.message}`);
-    }
-    await sleep(DELAY_BETWEEN_PAGES);
+  let queueLock = Promise.resolve();
+  async function takeTask() {
+    let task = null;
+    await (queueLock = queueLock.then(() => {
+      if (queue.length > MAX_QUEUE_SIZE) queue.length = MAX_QUEUE_SIZE;
+      task = queue.shift() || null;
+    }));
+    return task;
   }
-}
 
   let metricLock = Promise.resolve();
   let batchProcessed = 0;
@@ -518,10 +479,10 @@ async function loop(browserIndex) {
     const sc = throttleTracker.score();
     return {
       pageCount,
+      maxPagesToCrawl: MAX_PAGES_TO_CRAWL,
       queue: queue.length,
       maxQueue: MAX_QUEUE_SIZE,
       items: state.itemsByUrl.size,
-      maxPagesToCrawl: MAX_PAGES_TO_CRAWL,
       batchProcessed,
       batchTracks,
       batchDepth: batchDepth ?? null,
@@ -567,6 +528,8 @@ async function loop(browserIndex) {
     const browser = browsers[browserIndex];
     while (true) {
       if (throttled) break;
+      if (pageCount >= MAX_PAGES_TO_CRAWL) break;
+
       const task = await takeTask();
       if (!task) break;
 
@@ -593,6 +556,7 @@ async function loop(browserIndex) {
       } catch (e) {
         console.error(`[${workerLabel}] task error: ${e.message}`);
       }
+
       await sleep(DELAY_BETWEEN_PAGES);
     }
   }
@@ -601,8 +565,8 @@ async function loop(browserIndex) {
   for (let b = 0; b < MAX_BROWSERS; b++) {
     for (let p = 0; p < PARALLEL_PER_BROWSER; p++) loops.push(loop(b));
   }
-  await Promise.all(loops);
 
+  await Promise.all(loops);
   await flushMetrics(true);
   stopHeartbeat();
 
@@ -847,15 +811,14 @@ async function runWorker(workflowFile) {
         for (const si of sec.items || []) {
           const t = detectType(si.url);
           if (['artist', 'album', 'single', 'playlist', 'chart', 'room'].includes(t)) {
-            // emit clamped depth so depth2 stays depth2 targets
-            next.push({ url: si.url, depth: Math.min(MAX_DEPTH, 2) });
+            next.push({ url: si.url, depth: 2 });
           }
         }
       }
       for (const fi of it.featuredItems || []) {
         const t = detectType(fi.url);
         if (['artist', 'album', 'single', 'playlist', 'chart', 'room'].includes(t)) {
-          next.push({ url: fi.url, depth: Math.min(MAX_DEPTH, 2) });
+          next.push({ url: fi.url, depth: 2 });
         }
       }
     }
@@ -868,10 +831,7 @@ async function runWorker(workflowFile) {
 
   console.log(`[${workerLabel}] done -> ${outFile}`);
 
-  if (throttledExit) {
-    process.exit(THROTTLE_REQUEUE_EXIT_CODE);
-  }
-
+  if (throttledExit) process.exit(THROTTLE_REQUEUE_EXIT_CODE);
   return outFile;
 }
 
@@ -960,18 +920,16 @@ function buildRequeueWorkflows() {
     if (!rq?.remainingQueue?.length) continue;
 
     const wid = `${rq.workerId}-retry-${Date.now()}`;
-    const wfName = `${wid}.json`;
-    const outName = `${wid}.json`;
-
-    workflows.push(writeWorkflow(wfName, {
+    workflows.push(writeWorkflow(`${wid}.json`, {
       kind: 'crawl',
       phase: 'requeue',
       workerId: wid,
       depth: 2,
       queue: rq.remainingQueue.map(x => ({ url: x.url, depth: 2 })),
-      outputName: outName,
+      outputName: `${wid}.json`,
     }));
   }
+
   return workflows;
 }
 
@@ -981,18 +939,18 @@ async function runOrchestrator() {
   console.log('========================================');
   console.log('Apple Music Orchestrator');
   console.log(`Per worker: ${MAX_BROWSERS} browsers, ${PARALLEL_PER_BROWSER} per browser (${TOTAL_TASK_LOOPS} loops)`);
-  console.log('Flow: 3x depth1 -> 9x depth2 -> requeue retries -> merge -> artist workers -> final merge');
+  console.log(`Test cap: ${MAX_PAGES_TO_CRAWL} pages per crawl worker`);
+  console.log('Flow: 3x depth1 -> 9x depth2 -> requeue -> merge -> artists -> final merge');
   console.log('========================================');
 
   const totalWorkers = DEPTH1_SPLITS + (DEPTH1_SPLITS * DEPTH2_SPLITS_PER_DEPTH1) + ARTIST_WORKERS;
   const orchestratorState = { stage: 'starting', completedWorkers: 0, totalWorkers, requeueWorkers: 0 };
   const stopHeartbeat = startHeartbeat('orchestrator', () => orchestratorState);
 
-  // 1) Depth1
   orchestratorState.stage = 'depth1';
   const seedSplits = splitArray(SEED_URLS.map(url => ({ url, depth: 1 })), DEPTH1_SPLITS);
-  const d1wfs = [];
 
+  const d1wfs = [];
   for (let i = 0; i < DEPTH1_SPLITS; i++) {
     d1wfs.push(writeWorkflow(`depth1-w${i + 1}.json`, {
       kind: 'crawl',
@@ -1011,7 +969,6 @@ async function runOrchestrator() {
       .then(() => { orchestratorState.completedWorkers += 1; })
   ));
 
-  // 2) Depth2 (9 workers)
   orchestratorState.stage = 'depth2';
   const d2wfs = [];
   for (let i = 0; i < DEPTH1_SPLITS; i++) {
@@ -1037,7 +994,6 @@ async function runOrchestrator() {
       .then(() => { orchestratorState.completedWorkers += 1; });
   }));
 
-  // 2.5) Requeue retry pass (new workers for throttled leftovers)
   orchestratorState.stage = 'requeue';
   const rqWorkflows = buildRequeueWorkflows();
   orchestratorState.requeueWorkers = rqWorkflows.length;
@@ -1051,20 +1007,13 @@ async function runOrchestrator() {
     }));
   }
 
-  // 3) Merge crawl
   orchestratorState.stage = 'merge-crawl';
-  const crawlMergedFile = path.join(DATA_DIR, 'us-crawl-only.json');
-  await runMerge(path.join(OUTPUT_DIR, 'us-depth*.json'), crawlMergedFile);
+  await runMerge(path.join(OUTPUT_DIR, 'us-depth*.json'), path.join(DATA_DIR, 'us-crawl-only.json'));
+  await runMerge(path.join(OUTPUT_DIR, '*retry-*.json'), path.join(DATA_DIR, 'us-crawl-requeue-only.json'));
 
-  // include requeue outputs in crawl-only merge as well
-  const requeueMergedFile = path.join(DATA_DIR, 'us-crawl-requeue-only.json');
-  await runMerge(path.join(OUTPUT_DIR, '*retry-*.json'), requeueMergedFile);
-
-  // 4) Artists
   orchestratorState.stage = 'artists';
   const artistSplits = splitArray(TOP_ARTISTS, ARTIST_WORKERS);
   const artistWfs = [];
-
   for (let i = 0; i < ARTIST_WORKERS; i++) {
     artistWfs.push(writeWorkflow(`artists-w${i + 1}.json`, {
       kind: 'artist-batch',
@@ -1080,7 +1029,6 @@ async function runOrchestrator() {
       .then(() => { orchestratorState.completedWorkers += 1; })
   ));
 
-  // 5) Final merge
   orchestratorState.stage = 'merge-final';
   await runMerge(path.join(OUTPUT_DIR, '*.json'), FINAL_OUTPUT);
 
