@@ -288,7 +288,7 @@ const MAX_DEPTH = 3;
 const DEPTH2_SPLITS = 3;
 const DEPTH3_SPLITS_PER_DEPTH2 = 3;
 
-const ARTIST_WORKERS = 12; // post-crawl artist jobs, run in parallel
+const ARTIST_WORKERS = 12;
 const MAX_BROWSERS = 10;
 const PARALLEL_PER_BROWSER = 5;
 const TOTAL_TASK_LOOPS = MAX_BROWSERS * PARALLEL_PER_BROWSER;
@@ -298,6 +298,7 @@ const MAX_TRACKS_PER_ITEM = 500;
 const MAX_SUBPAGES_PER_ARTIST = 3;
 const PAGE_TIMEOUT = 30000;
 const DELAY_BETWEEN_PAGES = 120;
+const HEARTBEAT_MS = 30000;
 
 const ROOT_DIR = __dirname;
 const DATA_DIR = path.join(ROOT_DIR, 'data');
@@ -377,6 +378,18 @@ function normalizeOutputItem(item) {
     featuredItems: item.featuredItems || [],
     subItems: item.subItems || [],
   };
+}
+
+function startHeartbeat(label, getSnapshot) {
+  const timer = setInterval(() => {
+    try {
+      const snap = getSnapshot ? getSnapshot() : {};
+      console.log(`[HEARTBEAT:${label}] ${new Date().toISOString()} ${JSON.stringify(snap)}`);
+    } catch (e) {
+      console.log(`[HEARTBEAT:${label}] ${new Date().toISOString()} alive`);
+    }
+  }, HEARTBEAT_MS);
+  return () => clearInterval(timer);
 }
 
 async function scrollUntilExhausted(page, direction = 'vertical') {
@@ -615,6 +628,16 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
   let batchDepth = null;
   const batchSubtitles = new Set();
 
+  const stopHeartbeat = startHeartbeat(`crawl:${workerLabel}`, () => ({
+    pageCount,
+    queue: queue.length,
+    maxQueue: MAX_QUEUE_SIZE,
+    items: state.itemsByUrl.size,
+    batchProcessed,
+    batchTracks,
+    batchDepth: batchDepth ?? null,
+  }));
+
   async function addMetrics(result) {
     await (metricLock = metricLock.then(() => {
       if (batchDepth === null && typeof result.depth === 'number') batchDepth = result.depth;
@@ -677,6 +700,7 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
   await Promise.all(loops);
 
   await flushMetrics(true);
+  stopHeartbeat();
 }
 
 async function findArtistUrl(browser, artistName) {
@@ -784,6 +808,13 @@ async function runWorker(workflowFile) {
   const state = { visited: new Set(wf.visited || []), itemsByUrl: new Map() };
   for (const si of wf.seedItems || []) if (si?.url) state.itemsByUrl.set(si.url, normalizeOutputItem(si));
 
+  const stopHeartbeat = startHeartbeat(`worker:${workerLabel}`, () => ({
+    kind: wf.kind,
+    depth: wf.depth || null,
+    items: state.itemsByUrl.size,
+    visited: state.visited.size,
+  }));
+
   const pool = await createBrowserPool();
   try {
     if (wf.kind === 'crawl') {
@@ -797,8 +828,13 @@ async function runWorker(workflowFile) {
         }
       }
     } else if (wf.kind === 'artist-batch') {
-      // parallel artist processing with 10 browsers * 5 loops
       const artistQueue = [...(wf.artists || [])];
+      const stopArtistHeartbeat = startHeartbeat(`artists:${workerLabel}`, () => ({
+        remainingArtists: artistQueue.length,
+        items: state.itemsByUrl.size,
+        visited: state.visited.size,
+      }));
+
       async function artistLoop(browserIndex) {
         const b = pool[browserIndex];
         while (true) {
@@ -820,9 +856,11 @@ async function runWorker(workflowFile) {
         for (let p = 0; p < PARALLEL_PER_BROWSER; p++) loops.push(artistLoop(b));
       }
       await Promise.all(loops);
+      stopArtistHeartbeat();
     }
   } finally {
     await closeBrowserPool(pool);
+    stopHeartbeat();
   }
 
   const items = Array.from(state.itemsByUrl.values());
@@ -857,13 +895,31 @@ async function runWorker(workflowFile) {
 function spawnNode(childArgs, logFile) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [__filename, ...childArgs], {
-      cwd: ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
+      cwd: ROOT_DIR,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
     });
+
     const log = fs.createWriteStream(logFile, { flags: 'a' });
-    child.stdout.on('data', d => log.write(d));
-    child.stderr.on('data', d => log.write(d));
-    child.on('error', reject);
-    child.on('close', code => {
+
+    child.stdout.on('data', (d) => {
+      const s = d.toString();
+      process.stdout.write(s);
+      log.write(s);
+    });
+
+    child.stderr.on('data', (d) => {
+      const s = d.toString();
+      process.stderr.write(s);
+      log.write(s);
+    });
+
+    child.on('error', (err) => {
+      log.end();
+      reject(err);
+    });
+
+    child.on('close', (code) => {
       log.end();
       if (code === 0) resolve();
       else reject(new Error(`Child failed (${code}): ${childArgs.join(' ')}`));
@@ -921,7 +977,15 @@ async function runOrchestrator() {
   console.log(`Flow: depth1 -> 3x depth2 -> 9x depth3 -> merge -> artist workers -> final merge`);
   console.log('========================================');
 
+  const orchestratorState = {
+    stage: 'starting',
+    completedWorkers: 0,
+    totalWorkers: 1 + DEPTH2_SPLITS + (DEPTH2_SPLITS * DEPTH3_SPLITS_PER_DEPTH2) + ARTIST_WORKERS,
+  };
+  const stopHeartbeat = startHeartbeat('orchestrator', () => orchestratorState);
+
   // 1) Depth 1
+  orchestratorState.stage = 'depth1';
   const d1wf = writeWorkflow('depth1.json', {
     kind: 'crawl',
     phase: 'depth1',
@@ -933,8 +997,10 @@ async function runOrchestrator() {
     emitNextDepthLinksFile: workflowPath('depth1-next-links.json'),
   });
   await spawnNode(['--mode', 'worker', '--workflow', d1wf], path.join(LOG_DIR, 'depth1.log'));
+  orchestratorState.completedWorkers += 1;
 
   // 2) Depth 2 split into 3
+  orchestratorState.stage = 'depth2';
   const d1next = loadJson(workflowPath('depth1-next-links.json'), { links: [] });
   const d2candidates = dedupeByUrl((d1next.links || []).map(l => ({ url: l.url, depth: 2 })));
   const d2splits = splitArray(d2candidates, DEPTH2_SPLITS);
@@ -953,9 +1019,11 @@ async function runOrchestrator() {
   }
   await Promise.all(d2wfs.map((wf, i) =>
     spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `depth2-w${i + 1}.log`))
+      .then(() => { orchestratorState.completedWorkers += 1; })
   ));
 
   // 3) Depth 3 split each depth2 into 3 => 9
+  orchestratorState.stage = 'depth3';
   const d3wfs = [];
   for (let i = 0; i < DEPTH2_SPLITS; i++) {
     const d2next = loadJson(workflowPath(`depth2-w${i + 1}-next-links.json`), { links: [] });
@@ -975,14 +1043,17 @@ async function runOrchestrator() {
   }
   await Promise.all(d3wfs.map(wf => {
     const id = path.basename(wf, '.json');
-    return spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `${id}.log`));
+    return spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `${id}.log`))
+      .then(() => { orchestratorState.completedWorkers += 1; });
   }));
 
   // 4) Merge crawl-only
+  orchestratorState.stage = 'merge-crawl';
   const crawlMergedFile = path.join(DATA_DIR, 'us-crawl-only.json');
   await runMerge(path.join(OUTPUT_DIR, 'us-depth*.json'), crawlMergedFile);
 
-  // 5) Artist pipeline (post-crawl): split TOP_ARTISTS into ARTIST_WORKERS
+  // 5) Artist pipeline
+  orchestratorState.stage = 'artists';
   const artistSplits = splitArray(TOP_ARTISTS, ARTIST_WORKERS);
   const artistWfs = [];
   for (let i = 0; i < ARTIST_WORKERS; i++) {
@@ -997,11 +1068,15 @@ async function runOrchestrator() {
 
   await Promise.all(artistWfs.map((wf, i) =>
     spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `artists-w${i + 1}.log`))
+      .then(() => { orchestratorState.completedWorkers += 1; })
   ));
 
-  // 6) Final merge (crawl + artists)
+  // 6) Final merge
+  orchestratorState.stage = 'merge-final';
   await runMerge(path.join(OUTPUT_DIR, '*.json'), FINAL_OUTPUT);
 
+  orchestratorState.stage = 'done';
+  stopHeartbeat();
   console.log(`Done. Final output: ${FINAL_OUTPUT}`);
 }
 
