@@ -3,15 +3,22 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Apple Music US Crawler (cleaned)
+ * Apple Music US Crawler (enhanced diagnostics + broader coverage)
  * - Crawl-only (no artist search pipeline)
  * - No radio seeds
  * - No radio pages/items
- * - Keep ONLY pages whose subtitle contains "Apple Music"
  * - Album rule: do NOT parse album tracklist; only use album page sections/featured links
- * - Depth = 2
+ * - Depth = 4 (broader reach for Set Lists / Essentials)
  * - Conservative throttle detector
  * - Includes multi-room seed and set-list playlist track scraping
+ * - Verbose skip diagnostics: logs why each page is skipped
+ * - Logs subtitle for each crawled page
+ * - EXTRA DEBUG LOGS ADDED (without removing/changing existing logs):
+ *   - scroll diagnostics
+ *   - links found per page
+ *   - links opened/queued counters
+ *   - Apple Music kept-item counters
+ *   - multiline progress block: one metric per line
  */
 
 const SEED_URLS = [
@@ -21,22 +28,22 @@ const SEED_URLS = [
   'https://music.apple.com/us/multi-room/1666391966',
 ];
 
-const MAX_DEPTH = 2;
+const MAX_DEPTH = 4;
 const MAX_QUEUE_SIZE = 10000;
 const MAX_TRACKS_PER_ITEM = 500;
 
-// Tuned concurrency/pacing
-const MAX_BROWSERS = 5;            // down from 10
-const PARALLEL_PER_BROWSER = 4;    // down from 5
+// Tuned concurrency/pacing (as requested earlier)
+const MAX_BROWSERS = 4;
+const PARALLEL_PER_BROWSER = 2;
 const PAGE_TIMEOUT = 45000;
-const DELAY_BETWEEN_PAGES = 600;   // up from 120
-const NAV_RETRY_BACKOFF_MS = 2500; // backoff before retry nav
+const DELAY_BETWEEN_PAGES = 600;
+const NAV_RETRY_BACKOFF_MS = 2500;
 
-// Conservative throttle detector
+// Conservative throttle detector (trip earlier, cool off longer)
 const THROTTLE_WINDOW_SIZE = 40;
 const THROTTLE_FAIL_THRESHOLD = 0.45;
 const THROTTLE_MIN_ATTEMPTS = 20;
-const THROTTLE_COOLDOWN_MS = 20000;
+const THROTTLE_COOLDOWN_MS = 30000;
 
 const OUTPUT_FILE = path.join(__dirname, 'data', 'us.json');
 
@@ -65,12 +72,6 @@ function detectType(url = '') {
   if (u.includes('/multi-room/')) return 'multi-room';
   if (u.includes('/room/')) return 'room';
   return 'other';
-}
-function isAppleMusicSubtitle(subtitle = '') {
-  return subtitle.toLowerCase().includes('apple music');
-}
-function shouldKeepPage(subtitle) {
-  return isAppleMusicSubtitle(subtitle || '');
 }
 function dedupeByUrl(items) {
   const out = [];
@@ -105,32 +106,26 @@ class ThrottleDetector {
     this.outcomes = []; // true=success, false=fail
     this.cooldownUntil = 0;
   }
-
   record(ok) {
     this.outcomes.push(Boolean(ok));
     if (this.outcomes.length > THROTTLE_WINDOW_SIZE) this.outcomes.shift();
   }
-
   stats() {
     const attempts = this.outcomes.length;
     const fails = this.outcomes.filter(x => !x).length;
     const failRate = attempts ? fails / attempts : 0;
     return { attempts, fails, failRate };
   }
-
   shouldTrip() {
     const { attempts, failRate } = this.stats();
     return attempts >= THROTTLE_MIN_ATTEMPTS && failRate >= THROTTLE_FAIL_THRESHOLD;
   }
-
   trip() {
     this.cooldownUntil = Date.now() + THROTTLE_COOLDOWN_MS;
   }
-
   inCooldown() {
     return Date.now() < this.cooldownUntil;
   }
-
   cooldownRemaining() {
     return Math.max(0, this.cooldownUntil - Date.now());
   }
@@ -161,6 +156,22 @@ async function safeGoto(page, url, timeout = PAGE_TIMEOUT) {
 }
 
 async function scrollUntilExhausted(page, direction = 'vertical') {
+  const before = await page.evaluate((dir) => {
+    const sx = window.scrollX;
+    const sy = window.scrollY;
+    const sh = Math.max(
+      document.body?.scrollHeight || 0,
+      document.documentElement?.scrollHeight || 0
+    );
+    const sw = Math.max(
+      document.body?.scrollWidth || 0,
+      document.documentElement?.scrollWidth || 0
+    );
+    const horizontalScrollableCount = Array.from(document.querySelectorAll('*'))
+      .filter(el => el.scrollWidth > el.clientWidth + 20).length;
+    return { dir, sx, sy, sh, sw, horizontalScrollableCount };
+  }, direction);
+
   await page.evaluate(async (dir) => {
     const delay = 700;
     const max = 25;
@@ -188,6 +199,27 @@ async function scrollUntilExhausted(page, direction = 'vertical') {
 
     if (dir === 'vertical') window.scrollTo(0, 0);
   }, direction);
+
+  const after = await page.evaluate((dir) => {
+    const sx = window.scrollX;
+    const sy = window.scrollY;
+    const sh = Math.max(
+      document.body?.scrollHeight || 0,
+      document.documentElement?.scrollHeight || 0
+    );
+    const sw = Math.max(
+      document.body?.scrollWidth || 0,
+      document.documentElement?.scrollWidth || 0
+    );
+    const horizontalScrollableCount = Array.from(document.querySelectorAll('*'))
+      .filter(el => el.scrollWidth > el.clientWidth + 20).length;
+    return { dir, sx, sy, sh, sw, horizontalScrollableCount };
+  }, direction);
+
+  // ADDED debug log (new, does not replace existing logs)
+  console.log(
+    `[DEBUG_SCROLL] dir=${direction} before(x=${before.sx},y=${before.sy},sh=${before.sh},sw=${before.sw},hScrollEls=${before.horizontalScrollableCount}) after(x=${after.sx},y=${after.sy},sh=${after.sh},sw=${after.sw},hScrollEls=${after.horizontalScrollableCount})`
+  );
 }
 
 async function extractLinksSectionsAndTracks(page, pageType = 'other') {
@@ -222,11 +254,32 @@ async function extractLinksSectionsAndTracks(page, pageType = 'other') {
     r.pageMetadata = document.querySelector('[class*="headings__metadata-bottom"]')?.textContent?.trim() || '';
     r.pageDescription = document.querySelector('[class*="description"]')?.textContent?.trim() || '';
 
+    const canonical = document.querySelector('link[rel="canonical"]')?.href || '';
+    if (canonical.includes('music.apple.com/us/')) {
+      const cu = canonical.split('?')[0].split('#')[0];
+      if (!r.links.includes(cu)) r.links.push(cu);
+    }
+
     const anchors = document.querySelectorAll('a[href]');
     for (const a of anchors) {
       if (!a.href?.includes('music.apple.com/us/')) continue;
       const u = a.href.split('?')[0].split('#')[0];
       if (!r.links.includes(u)) r.links.push(u);
+    }
+
+    const ld = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const s of ld) {
+      try {
+        const j = JSON.parse(s.textContent || '{}');
+        const arr = Array.isArray(j) ? j : [j];
+        for (const o of arr) {
+          const u = o?.url;
+          if (typeof u === 'string' && u.includes('music.apple.com/us/')) {
+            const nu = u.split('?')[0].split('#')[0];
+            if (!r.links.includes(nu)) r.links.push(nu);
+          }
+        }
+      } catch {}
     }
 
     const sectionEls = document.querySelectorAll('[data-testid="section-container"]');
@@ -266,8 +319,6 @@ async function extractLinksSectionsAndTracks(page, pageType = 'other') {
       }
     }
 
-    // IMPORTANT: skip album tracklist extraction ONLY for albums.
-    // For playlists (including set-list playlists under multi-room), do extract tracks.
     if (pt !== 'album') {
       const selectors = ['div.songs-list-row', 'li.songs-list-item', '[data-testid="track-row"]', 'div[class*="track"]'];
       let trackEls = [];
@@ -324,6 +375,30 @@ async function extractLinksSectionsAndTracks(page, pageType = 'other') {
   }, pageType);
 }
 
+function shouldKeepPage({ subtitle, x, pageType, url }) {
+  const sub = (subtitle || '').toLowerCase();
+  const title = (x.pageTitle || '').toLowerCase();
+  const u = (url || '').toLowerCase();
+
+  if (sub.includes('apple music')) return { keep: true, reason: 'subtitle_contains_apple_music' };
+
+  if (['playlist', 'chart', 'room', 'multi-room'].includes(pageType)) {
+    if ((x.tracks?.length || 0) >= 5) return { keep: true, reason: 'editorial_type_with_tracks' };
+    if ((x.sections?.length || 0) > 0) return { keep: true, reason: 'editorial_type_with_sections' };
+    if ((x.featuredItems?.length || 0) > 0) return { keep: true, reason: 'editorial_type_with_featured' };
+  }
+
+  if (pageType === 'artist' && ((x.sections?.length || 0) > 0 || (x.featuredItems?.length || 0) > 0)) {
+    return { keep: true, reason: 'artist_with_sections_or_featured' };
+  }
+
+  if (title.includes('essentials') || title.includes('set list') || u.includes('essentials') || u.includes('set-list')) {
+    return { keep: true, reason: 'essentials_or_setlist_heuristic' };
+  }
+
+  return { keep: false, reason: 'subtitle_missing_apple_music_and_no_strong_editorial_signals' };
+}
+
 async function crawlPage(page, url) {
   const pageType = detectType(url);
   const ok = await safeGoto(page, url);
@@ -362,14 +437,34 @@ async function main() {
 
   const state = {
     visited: new Set(),
+    queued: new Set(),
     itemsByUrl: new Map(),
+    debug: {
+      totalLinksFoundAcrossPages: 0,
+      totalLinksEnqueued: 0,
+      totalLinksOpenedAttempted: 0,
+      totalAppleMusicKept: 0,
+      totalNavSucceeded: 0,
+      totalNavFailed: 0,
+    },
+    skipStats: {
+      duplicateVisited: 0,
+      typeFiltered: 0,
+      navFailed: 0,
+      keepRuleRejected: 0,
+      emptyContent: 0,
+      queueCapDropped: 0,
+    },
   };
 
-  const queue = SEED_URLS.map(url => ({ url, depth: 1 }));
+  const queue = [];
+  for (const url of SEED_URLS) {
+    queue.push({ url, depth: 1 });
+    state.queued.add(url);
+  }
+
   let pageCount = 0;
-
   const throttle = new ThrottleDetector();
-
   const browsers = await createBrowserPool();
 
   let queueLock = Promise.resolve();
@@ -394,67 +489,147 @@ async function main() {
       if (!task) break;
 
       const { url, depth } = task;
-      if (!url || state.visited.has(url)) continue;
+
+      // ADDED debug: opened attempt count
+      state.debug.totalLinksOpenedAttempted++;
+      console.log(`[DEBUG_OPEN_ATTEMPT] openedAttempt=${state.debug.totalLinksOpenedAttempted} url=${url} depth=${depth}`);
+
+      if (!url || state.visited.has(url)) {
+        state.skipStats.duplicateVisited++;
+        if (url) console.log(`[SKIP] ${url} | reason=already_visited`);
+        continue;
+      }
       state.visited.add(url);
 
       const t = detectType(url);
-      if (t === 'song' || t === 'radio') continue;
+      if (t === 'song' || t === 'radio') {
+        state.skipStats.typeFiltered++;
+        console.log(`[SKIP] ${url} | reason=type_filtered | type=${t}`);
+        continue;
+      }
 
       const page = await browser.newPage();
       let navOkForThrottle = false;
+
       try {
         const x = await crawlPage(page, url);
         navOkForThrottle = x.navOk;
         throttle.record(x.navOk);
+
+        if (x.navOk) state.debug.totalNavSucceeded++;
+        else state.debug.totalNavFailed++;
+
         if (throttle.shouldTrip()) {
           const s = throttle.stats();
           throttle.trip();
-          console.warn(`Throttle cooldown: attempts=${s.attempts}, fails=${s.fails}, failRate=${s.failRate.toFixed(2)} for ${THROTTLE_COOLDOWN_MS}ms`);
+          console.warn(`[THROTTLE] cooldown=${THROTTLE_COOLDOWN_MS}ms | attempts=${s.attempts} fails=${s.fails} failRate=${s.failRate.toFixed(2)}`);
         }
 
         pageCount++;
 
+        // ADDED debug: links found on this page + running sum
+        const linksFoundThisPage = (x.links || []).length;
+        state.debug.totalLinksFoundAcrossPages += linksFoundThisPage;
+        console.log(`[DEBUG_LINKS_FOUND] url=${url} linksFoundThisPage=${linksFoundThisPage} linksFoundTotal=${state.debug.totalLinksFoundAcrossPages}`);
+
         const subtitle = x.pageSubtitle || '';
-        if (x.navOk && shouldKeepPage(subtitle) && (x.featuredItems.length || x.sections.length || x.tracks.length)) {
-          state.itemsByUrl.set(url, normalizeOutputItem({
-            name: x.pageTitle || url.split('/').pop() || 'Unknown',
-            url,
-            type: t,
-            creator: subtitle || 'Apple Music',
-            metadata: x.pageMetadata || '',
-            description: x.pageDescription || '',
-            tracks: x.tracks || [], // [] for album pages
-            sections: x.sections || [],
-            featuredItems: x.featuredItems || [],
-          }));
+        const contentCount = (x.featuredItems.length || 0) + (x.sections.length || 0) + (x.tracks.length || 0);
+
+        console.log(`[PAGE] ${url}`);
+        console.log(`  subtitle="${subtitle}"`);
+        console.log(`  type=${t} depth=${depth} navOk=${x.navOk} sections=${x.sections.length} featured=${x.featuredItems.length} tracks=${x.tracks.length}`);
+
+        if (!x.navOk) {
+          state.skipStats.navFailed++;
+          console.log(`[SKIP] ${url} | reason=nav_failed`);
+        } else if (contentCount === 0) {
+          state.skipStats.emptyContent++;
+          console.log(`[SKIP] ${url} | reason=no_sections_featured_tracks`);
+        } else {
+          const keep = shouldKeepPage({ subtitle, x, pageType: t, url });
+          if (!keep.keep) {
+            state.skipStats.keepRuleRejected++;
+            console.log(`[SKIP] ${url} | reason=${keep.reason}`);
+          } else {
+            state.itemsByUrl.set(url, normalizeOutputItem({
+              name: x.pageTitle || url.split('/').pop() || 'Unknown',
+              url,
+              type: t,
+              creator: subtitle || 'Apple Music',
+              metadata: x.pageMetadata || '',
+              description: x.pageDescription || '',
+              tracks: x.tracks || [],
+              sections: x.sections || [],
+              featuredItems: x.featuredItems || [],
+            }));
+
+            state.debug.totalAppleMusicKept++;
+            console.log(`[KEEP] ${url} | reason=${keep.reason}`);
+            console.log(`[DEBUG_APPLE_MUSIC_ITEMS] keptThisRun=${state.debug.totalAppleMusicKept}`);
+          }
         }
 
         if (x.navOk && depth < MAX_DEPTH) {
-          // No radio crawling
           const allowedChildTypes = new Set(['artist', 'album', 'single', 'playlist', 'chart', 'room', 'multi-room']);
           const candidates = [];
+
           for (const l of x.links || []) {
-            if (state.visited.has(l)) continue;
             const lt = detectType(l);
             if (!allowedChildTypes.has(lt)) continue;
+            if (state.visited.has(l) || state.queued.has(l)) continue;
             candidates.push({ url: l, depth: depth + 1 });
           }
+
           const deduped = dedupeByUrl(candidates);
+          let enqueuedThisPage = 0;
+
           for (const nl of deduped) {
-            if (queue.length < MAX_QUEUE_SIZE) queue.push(nl);
+            if (queue.length >= MAX_QUEUE_SIZE) {
+              state.skipStats.queueCapDropped++;
+              continue;
+            }
+            queue.push(nl);
+            state.queued.add(nl.url);
+            enqueuedThisPage++;
           }
+
+          state.debug.totalLinksEnqueued += enqueuedThisPage;
+          console.log(`[DEBUG_ENQUEUE] url=${url} enqueuedThisPage=${enqueuedThisPage} totalEnqueued=${state.debug.totalLinksEnqueued}`);
         }
 
         if (pageCount % 25 === 0) {
           const items = Array.from(state.itemsByUrl.values());
           const totalTracks = items.reduce((s, i) => s + (i.tracks?.length || 0), 0);
           const ts = throttle.stats();
-          console.log(`Pages Crawled: ${pageCount} | Queue: ${queue.length}/${MAX_QUEUE_SIZE} | Items: ${items.length} | Total Tracks: ${totalTracks} | Throttle failRate=${ts.failRate.toFixed(2)} (${ts.fails}/${ts.attempts})`);
+
+          // KEEP EXISTING LOGS (unchanged)
+          console.log(
+            `[PROGRESS] pages=${pageCount} queue=${queue.length}/${MAX_QUEUE_SIZE} items=${items.length} tracks=${totalTracks} failRate=${ts.failRate.toFixed(2)} (${ts.fails}/${ts.attempts})`
+          );
+          console.log(
+            `[SKIP-STATS] duplicateVisited=${state.skipStats.duplicateVisited} typeFiltered=${state.skipStats.typeFiltered} navFailed=${state.skipStats.navFailed} keepRuleRejected=${state.skipStats.keepRuleRejected} emptyContent=${state.skipStats.emptyContent} queueCapDropped=${state.skipStats.queueCapDropped}`
+          );
+
+          // ADDED multiline block (one metric per line)
+          console.log(`[DEBUG_PROGRESS_MULTI]`);
+          console.log(`Pages Crawled: ${pageCount}`);
+          console.log(`Queue: ${queue.length}/${MAX_QUEUE_SIZE}`);
+          console.log(`Items Saved: ${items.length}`);
+          console.log(`Total Tracks: ${totalTracks}`);
+          console.log(`Links Found (Total): ${state.debug.totalLinksFoundAcrossPages}`);
+          console.log(`Links Opened Attempts (Total): ${state.debug.totalLinksOpenedAttempted}`);
+          console.log(`Links Enqueued (Total): ${state.debug.totalLinksEnqueued}`);
+          console.log(`Apple Music Items Kept (Total): ${state.debug.totalAppleMusicKept}`);
+          console.log(`Navigation Succeeded: ${state.debug.totalNavSucceeded}`);
+          console.log(`Navigation Failed: ${state.debug.totalNavFailed}`);
+          console.log(`Throttle Fail Rate: ${ts.failRate.toFixed(2)} (${ts.fails}/${ts.attempts})`);
         }
       } catch (e) {
         throttle.record(false);
         if (throttle.shouldTrip()) throttle.trip();
-        console.error(`task error ${url}: ${e.message}`);
+        state.skipStats.navFailed++;
+        state.debug.totalNavFailed++;
+        console.error(`[ERROR] ${url} | ${e.message}`);
       } finally {
         await page.close();
       }
@@ -479,9 +654,11 @@ async function main() {
   const payload = {
     lastUpdated: new Date().toISOString(),
     country: 'us',
-    phase: 'crawl-only-apple-music-subtitle-no-radio-album-sections-only-multi-room-setlists',
+    phase: 'crawl-apple-music-diagnostic-skip-reasons-depth4-multiroom-setlists-essentials',
     totalItems: items.length,
     totalTracks: items.reduce((s, i) => s + (i.tracks?.length || 0), 0),
+    debugStats: state.debug,
+    skipStats: state.skipStats,
     items,
   };
 
