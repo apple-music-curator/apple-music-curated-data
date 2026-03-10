@@ -6,7 +6,7 @@ const { spawn } = require('child_process');
 
 /**
  * ============================================================
- * Apple Music US Crawler + Artist Pipeline (Fully Edited)
+ * Apple Music US Crawler + Artist Pipeline (Full File)
  * ============================================================
  *
  * Includes:
@@ -18,7 +18,10 @@ const { spawn } = require('child_process');
  *  - MAX_SUBPAGES_PER_ARTIST = 1
  *  - Scroll max halved (25)
  *  - Robust navigation with safeGoto (domcontentloaded + fallback load)
- *  - Longer timeout for stability/completeness
+ *  - Album no-retry rule on hard failure
+ *  - Lower per-worker parallel pressure (PARALLEL_PER_BROWSER = 2)
+ *  - Better logging with worker label in metrics
+ *  - Throttle detection + requeue handoff
  *  - Heartbeats + streamed child logs
  */
 
@@ -35,252 +38,12 @@ const MANDATORY_ARTISTS = [
   { name: 'SAILORR', url: 'https://music.apple.com/us/artist/sailorr/1741604584' },
 ];
 
-// Keep your full existing list
+// Keep your complete list in production
 const TOP_ARTISTS = [
   'Bruno Mars', 'Bad Bunny', 'The Weeknd', 'Rihanna', 'Taylor Swift',
   'Justin Bieber', 'Lady Gaga', 'Coldplay', 'Billie Eilish', 'Drake',
   'J Balvin', 'Ariana Grande', 'Ed Sheeran', 'David Guetta', 'Shakira',
   'Kendrick Lamar', 'Maroon 5', 'Eminem', 'Calvin Harris', 'SZA',
-  'Kanye West', 'Pitbull', 'Daddy Yankee', 'Lana Del Rey', 'Dua Lipa',
-  'Sabrina Carpenter', 'Katy Perry', 'Zara Larsson', 'Sia', 'Post Malone',
-  'Michael Jackson', 'Olivia Dean', 'Rauw Alejandro', 'Harry Styles', 'sombr',
-  'Travis Scott', 'Chris Brown', 'Sean Paul', 'Adele', 'Doja Cat',
-  'Black Eyed Peas', 'Beyonce', 'RAYE', 'Future', 'Arctic Monkeys',
-  'Arijit Singh', 'Imagine Dragons', 'Linkin Park', 'Ozuna', 'KAROL G',
-  'Miley Cyrus', 'Alex Warren', 'Shreya Ghoshal', 'Djo', 'Sam Smith',
-  'Halsey', 'Queen', 'Khalid', 'Fleetwood Mac', 'Marshmello',
-  'Tate McRae', 'DJ Snake', 'The Chainsmokers', 'Ellie Goulding', 'Justin Timberlake',
-  'Pritam', 'Don Omar', 'Lil Wayne', 'A.R. Rahman', 'Olivia Rodrigo',
-  'Maluma', 'Don Toliver', 'Farruko', 'Elton John', 'Charlie Puth',
-  'Britney Spears', 'The Neighbourhood', 'USHER', 'OneRepublic', 'Red Hot Chili Peppers',
-  'Peso Pluma', '50 Cent', 'Ne-Yo', 'Tame Impala', 'Fuerza Regida',
-  'Anuel AA', 'JENNIE', 'Shawn Mendes', 'Radiohead', 'Wiz Khalifa',
-  'Nicki Minaj', 'One Direction', 'Playboi Carti', 'A$AP Rocky', 'Benson Boone',
-  'Camila Cabello', 'Daniel Caesar', 'Metro Boomin', 'Teddy Swims', 'KPop Demon Hunters Cast',
-  'Madonna', 'Hozier', 'The Police', 'J. Cole', 'Gorillaz',
-  'Kesha', 'Flo Rida', 'Selena Gomez', 'JAY-Z', 'Romeo Santos',
-  'Twenty One Pilots', '21 Savage', 'Disney', 'Tems', 'EJAE',
-  'Akon', 'Myke Towers', 'Grupo Frontera', 'Tyler The Creator', 'REI AMI',
-  'Kali Uchis', 'JHAYCO', 'Green Day', 'Frank Ocean', 'Feid',
-  'HUNTR/X', 'ABBA', 'Nicky Jam', 'Anitta', 'AUDREY NUNA',
-  'Swae Lee', 'Beele', 'The Marias', 'Avicii', 'Cardi B',
-  'Nirvana', 'Alicia Keys', 'Gracie Abrams', 'Ty Dolla Sign', 'AC/DC',
-  'Empire Of The Sun', 'Irshad Kamil', 'The Goo Goo Dolls', 'Tyla', 'Manuel Turizo',
-  'P!nk', 'The Kid LAROI', 'PinkPantheress', 'Lil Uzi Vert', 'Sachin-Jigar',
-  'Chappell Roan', 'Guns N Roses', 'Ovy On The Drums', 'Bebe Rexha', 'Tiesto',
-  'Pharrell Williams', 'Charli xcx', 'Udit Narayan', 'The Beatles', 'XXXTENTACION',
-  'Diplo', 'Enrique Iglesias', 'Tainy', 'Omar Courtz', 'Gunna',
-  'Nelly Furtado', 'Demi Lovato', 'Dominic Fike', 'Chencho Corleone', 'ROSALIA',
-  'Snoop Dogg', 'Paramore', 'Vishal-Shekhar', 'Mariah Carey', 'Morgan Wallen',
-  'KATSEYE', 'Amitabh Bhattacharya', 'Arcancel', 'Metallica', 'Major Lazer',
-  'Clean Bandit', 'Mac Miller', 'Bon Jovi', 'Juice WRLD', 'The Killers',
-  'Creedence Clearwater Revival', 'Jennifer Lopez', 'Billy Joel', 'Cigarettes After Sex', 'Tinashe',
-  'Tanishk Bagchi', 'Anne-Marie', 'Junior H', 'Lil Baby', 'Bizarrap',
-  'Christina Aguilera', 'Shankar Mahadevan', 'Mark Ronson', 'Atif Aslam', 'James Arthur',
-  'ZAYN', 'Danny Ocean', 'Ryan Castro', 'Mithoon', 'Cris MJ',
-  'Kodak Black', 'Dei V', 'Childish Gambino', 'Neton Vega', 'Dave',
-  'Jason Derulo', 'ROSE', 'Joji', 'Nengo Flow', 'Young Thug',
-  'Noah Kahan', 'Tom Odell', 'Quevedo', 'Phil Collins', 'PARTYNEXTDOOR',
-  'Miguel', 'Gigi Perez', 'Sonu Nigam', 'Macklemore', 'Whitney Houston',
-  'Kehlani', 'Carin Leon', 'Ava Max', 'Wisin Yandel', 'Plan B',
-  'Becky G', 'Luis Fonsi', 'Alan Walker', 'Zion Y Lennox', 'KK',
-  'The Cranberries', 'Ravyn Lenae', 'The Script', 'GIVeON', 'Florence + The Machine',
-  '2Pac', 'Oasis', 'El Alfa', 'Vishal Mishra', 'Alka Yagnik',
-  'DaBaby', 'Chinmayi', 'Kid Cudi', 'Doechii', 'SIENNA SPIRO',
-  'Bob Marley', 'Pink Floyd', 'TOTO', 'Bee Gees', 'Daft Punk',
-  'Lewis Capaldi', 'French Montana', 'The Rolling Stones', 'Blessd', 'Mohit Chauhan',
-  'Bryan Adams', 'Timbaland', 'Kygo', 'Sunidhi Chauhan', 'Tito Double P',
-  'Lorde', 'Aventura', 'Shankar-Ehsaan-Loy', 'Backstreet Boys', 'Robin Schulz',
-  'Sean Kingston', 'Aerosmith', 'Chris Stapleton', 'Burna Boy', 'Swedish House Mafia',
-  'Luke Combs', 'Nickelback', 'Zach Bryan', 'Mana', 'Prince Royce',
-  'Outkast', 'Manoj Muntashir', 'Vance Joy', 'Brent Faiyaz', 'The Notorious B.I.G.',
-  'El Bogueto', 'Sade', 'BLACKPINK', 'BTS', 'Trippie Redd',
-  'System Of A Down', 'Kapo', 'Jess Glynne', 'Evanescence', 'Central Cee',
-  'Rema', 'G-Eazy', 'Lola Young', 'Megan Thee Stallion', 'Keyshia Cole',
-  'Himesh Reshammiya', 'Kumaar', 'Lily-Rose Depp', 'Dire Straits', 'Tears For Fears',
-  'AFROJACK', 'Steve Lacy', 'Fall Out Boy', 'Sayeed Quadri', 'Laufey',
-  'Anderson .Paak', 'Rels B', 'Oscar Maydon', 'Shaggy', 'Kings of Leon',
-  'Lord Huron', 'Avril Lavigne', 'The Cure', 'TV Girl', 'Yandel',
-  'Yung Beef', 'Natanael Cano', 'B.o.B', 'Disco Lines', 'Dr. Dre',
-  'Sebastian Yatra', 'Tory Lanez', 'She Y Him', 'T-Pain', 'MC Meno K',
-  'Tyga', 'Shashwat Sachdev', 'Anirudh Ravichander', 'Mitski', 'Shilpa Rao',
-  'Nelly', 'Eagles', 'Keane', 'Vishal Dadlani', 'beabadoobee',
-  'Jack Harlow', 'Conan Gray', 'Elvis Presley', 'Gwen Stefani', 'Jowell Randy',
-  'De La Soul', 'Panic! At The Disco', 'Madison Beer', 'Alok', 'Meghan Trainor',
-  'The Smiths', 'benny blanco', 'Amit Trivedi', 'U2', 'Amy Winehouse',
-  'Daryl Hall John Oates', 'Javed Ali', 'John Legend', 'Camilo', 'd4vd',
-  'Maneskin', 'FloyyMenor', 'Limp Bizkit', 'Sachet-Parampara', 'Mc Gw',
-  'Disclosure', 'Jelly Roll', 'Kate Bush', 'Marvin Gaye', 'JVKE',
-  'Marc Anthony', 'Sajid-Wajid', 'HUGEL', 'Prince', 'Kunaal Vermaa',
-  'Luis Miguel', 'Anu Malik', 'Grupo Firme', 'Labrinth', 'Fetty Wap',
-  'Myles Smith', 'Sech', 'Foo Fighters', 'DJ Khaled', 'a-ha',
-  'Earth Wind Fire', 'Luis R Conriquez', 'Lost Frequencies', 'F1 The Album', 'Mora',
-  'Daya', 'Yo Yo Honey Singh', 'Neeti Mohan', 'Gabito Ballesteros', 'W Sound',
-  'MC Ryan SP', 'Mac DeMarco', 'Martin Garrix', 'George Michael', 'Christian Nodal',
-  'Eladio Carrion', 'Journey', 'Jubin Nautiyal', 'R.E.M.', 'The Offspring',
-  'Bruce Springsteen', 'BigXthaPlug', 'Ella Langley', 'Natasha Bedingfield', 'Rahat Fateh Ali Khan',
-  'Glass Animals', 'Bill Withers', 'EsDeeKid', 'Imogen Heap', 'Faheem Abdullah',
-  'Sachet Tandon', 'Amaal Mallik', 'Parampara Tandon', 'Julieta Venegas', 'Justin Quiles',
-  'Bryson Tiller', 'Skrillex', 'Fred again..', 'Lata Mangeshkar', 'YoungBoy Never Broke Again',
-  'Lenny Tavarez', 'David Bowie', 'Reik', 'Led Zeppelin', '3 Doors Down',
-  'Diljit Dosanjh', 'Coolio', 'Jonas Blue', 'Bastille', 'Nadhif Basalamah',
-  'Lauv', 'Lil Peep', 'Train', 'Ray Dalton', 'My Chemical Romance',
-  'Chase Atlantic', 'Bryant Myers', 'Baby Keem', 'Dido', 'De La Ghetto',
-  'Macklemore Ryan Lewis', 'Stevie Wonder', 'S. P. Balasubrahmanyam', 'Young Miko', 'Big Sean',
-  'Banda MS', 'Kailash Kher', 'Muse', 'Carly Rae Jepsen', 'Alejandro Sanz',
-  '5 Seconds of Summer', 'Hotel Ugly', 'Noriel', 'Kelly Clarkson', 'Xavi',
-  'Frank Sinatra', 'Lil Durk', 'Summer Walker', 'Stephen Sanchez', 'Jessie J',
-  'Foreigner', 'Celine Dion', 'Juanes', 'Shaarib Toshi', 'Julion Alvarez',
-  'Aditya Rikhari', 'Jason Mraz', 'Kausar Munir', 'GIMS', 'Karan Aujla',
-  'blink-182', 'Ricky Martin', 'Marco Antonio Solis', 'Bob Sinclar', 'The 1975',
-  'Migos', 'Devi Sri Prasad', 'Tulsi Kumar', 'Annie Lennox', 'Hariharan',
-  'Jeremih', 'Felix Jaehn', 'L.V.', 'Troye Sivan', 'FISHER',
-  'MGMT', 'Lil Tecca', 'DJ Japa NK', 'Mike Posner', 'Anuv Jain',
-  'Roop Kumar Rathod', 'JID', 'Addison Rae', 'Shaboozey', 'Lynyrd Skynyrd',
-  'Mc Rodrigo do CN', 'Yan Block', 'Yeat', 'Rochak Kohli', 'Scorpions',
-  'Lil Nas X', 'Sexyy Red', 'Jeet Gannguli', 'Weezer', 'Calum Scott',
-  'Rex Orange County', 'AP Dhillon', 'Roddy Ricch', 'Ayra Starr', 'Victor Mendivil',
-  'A Boogie Wit da Hoodie', 'Bomba Estereo', 'Zedd', 'Alphaville', 'Silk Sonic',
-  'Cyndi Lauper', 'Disturbed', 'Sukhwinder Singh', 'Three Days Grace', 'Deftones',
-  'Offset', 'Mon Laferte', 'Badshah', 'The Lumineers', 'Alessia Cara',
-  'Maria Becerra', 'slxughter', 'CeeLo Green', 'Chino Pacas', 'Stromae',
-  'Black Sabbath', 'Tones And I', 'Grupo Menos Es Mais', 'Sameer Anjaan', 'Wale',
-  'Darell', 'Mumford Sons', 'Boney M.', 'Joan Sebastian', 'Clairo',
-  'Piso 21', 'Alejandro Fernandez', 'Milo j', 'Madhubanti Bagchi', 'TWICE',
-  'Gym Class Heroes', 'Jonas Brothers', 'Christina Perri', 'Ajay-Atul', 'Jaani',
-  'PEDRO SAMPAIO', 'Mc Jacare', 'Zion', 'Jasmine Sandlas', 'Lenny Kravitz',
-  'Calibre 50', 'Benny Dayal', 'Andrew Choi', 'Latto', 'Pearl Jam',
-  'Gotye', 'Rvssian', 'Idgitaf', 'Los Angeles Azules', 'Juan Luis Guerra',
-  'Jatin-Lalit', 'La Arrolladora', 'Grupo Marca Registrada', 'Tony Dize', 'KISS',
-  'Armaan Malik', 'Ice Spice', 'Paulo Londra', 'Yebba', 'Bob Dylan',
-  'Billy Idol', 'mikeeysmind', 'Arcane', 'Dean Lewis', 'Alesso',
-  'Little Mix', 'The Fray', 'Henrique Juliano', 'Ruth B', 'Bon Iver',
-  'De La Rose', 'GloRilla', 'Lin-Manuel Miranda', 'Kelly Rowland', 'Topic',
-  'Duki', 'Asha Bhosle', 'John Newman', 'TINI', 'The Temper Trap',
-  'Gucci Mane', 'Wisin', 'Calle 24', 'NATTI NATASHA', 'Tove Lo',
-  'Roxette', 'ZXKAI', 'Chuwi', 'Mary J. Blige', 'Electric Light Orchestra',
-  'bees honey', 'Jonita Gandhi', 'John Mayer', 'Carlos Vives', 'Kumar Sanu',
-  'Salim-Sulaiman', 'Aleman', 'Melanie Martinez', 'WILLOW', 'Ben E. King',
-  'MXZI', 'League of Legends', 'Dave Stewart', 'K. S. Chithra', 'Sting',
-  'Gente De Zona', 'DJ Luian', 'Kacey Musgraves', 'Gabry Ponte', 'Eslabon Armado',
-  'Palak Muchhal', 'WizTheMc', 'will.i.am', 'Slipknot', 'Kimbra',
-  'Dolly Parton', 'Shania Twain', 'T.I.', 'Los Pleneros de la Cresta', 'Rae Sremmurd',
-  'Danger Mouse', 'Tracy Chapman', 'Eurythmics', 'Sadhana Sargam', 'Jasleen Royal',
-  'Gesaffelstein', 'Ariis', 'Jesse Joy', 'The Strokes', 'Destinys Child',
-  'Sid Sriram', 'Neha Kakkar', 'CYRIL', 'Hector El Father', 'The Clash',
-  'Ice Cube', 'Saja Boys', 'Cosculluela', 'Armaan Khan', 'Anand Raj Anand',
-  'Pop Smoke', 'Skepta', 'Jung Kook', 'The Pussycat Dolls', 'Eden Munoz',
-  'DJ DAVI DOGDOG', 'Beach House', 'Nile Rodgers', 'Luar La L', 'Hindia',
-  'TLC', 'Lenin Ramirez', 'B Praak', 'Elley Duhe', 'Artemas',
-  'NIKI', 'PNAU', 'Pamungkas', 'Julia Michaels', 'Mambo Kingz',
-  'LE SSERAFIM', 'Los Dareyes De La Sierra', 'Guru Randhawa', 'NF', 'Rick Ross',
-  'Mc Jhey', 'Ikky', 'NLE Choppa', 'Chayanne', 'Mazzy Star',
-  'Ozzy Osbourne', 'Lil Yachty', 'Shaan', 'Olly Alexander', 'Nicki Nicole',
-  'Willie Colon', 'Ms. Lauryn Hill', 'Jorge Mateus', 'Santana', 'AURORA',
-  'Starship', 'Lykke Li', 'blackbear', 'Iyaz', 'Noah Cyrus',
-  'Blondie', 'girl in red', 'Alfredo Olivas', 'Yorghaki', 'America',
-  'Creed', 'Alleh', 'Morat', 'Jay Wheeler', 'mgk',
-  'Leon Thomas', 'Polo G', 'ROA', 'Yahritza Y Su Esencia', 'Sayfalse',
-  'M8', 'Cage The Elephant', 'Harris Jayaraj', 'Depeche Mode', 'Rashmi Virag',
-  'KEVIN WOO', 'Danny Chung', 'samUIL Lee', 'Neckwav', 'Malcolm Todd',
-  'The Verve', 'Lizzy McAlpine', 'Gajendra Verma', 'Vicente Fernandez', 'Melody',
-  'Juan Gabriel', 'Dimitri Vegas Like Mike', 'LISA', 'Fifth Harmony', 'R. D. Burman',
-  'Tito El Bambino', 'Herencia De Grandes', 'Mc Lele JP', 'Abhijeet', 'Duran Duran',
-  'Lukas Graham', 'Trueno', 'Foster The People', 'Crowded House', 'Soulja Boy',
-  'Dj Samir', 'Milky Chance', 'Yuvan Shankar Raja', 'Audioslave', 'The Game',
-  'Icona Pop', 'Papa Roach', 'MARINA', 'ILLIT', 'Nadeem Shravan',
-  'The Cardigans', 'Manu Chao', 'Gusttavo Lima', 'Dimitri Vegas', 'Darshan Raval',
-  'Niall Horan', 'Emilia', 'Cassie', 'Mc Don Juan', 'Asees Kaur',
-  'Steve Aoki', 'The White Stripes', 'Matheus Kauan', 'Alec Benjamin', 'Raim Laode',
-  'Robbie Williams', 'Kris R.', 'bbno$', 'Gulzar', 'Mc Livinho',
-  'Kylie Minogue', 'Armin van Buuren', 'Karthik', 'Wizkid', 'La Oreja de Van Gogh',
-  'The Walters', 'Divya Kumar', 'Los Enanitos Verdes', 'Bonnie Tyler', 'Talwiinder',
-  'Michael Buble', 'Fergie', 'Bradley Cooper', 'Tiago PZK', 'Bring Me The Horizon',
-  'Omar Camacho', 'Chief Keef', 'Kavita Krishnamurthy', 'Mahalakshmi Iyer', 'Ana Castela',
-  'Survivor', 'Selena Gomez The Scene', 'ELENA ROSE', 'WALK THE MOON', 'The Smashing Pumpkins',
-  'Taio Cruz', 'fun.', 'Kishore Kumar', 'Sufjan Stevens', 'Ace of Base',
-  'Gangsta', 'NewJeans', 'RaiNao', 'Waka Flocka Flame', 'Shekhar Ravjiani',
-  'Los Tigres Del Norte', 'Meek Mill', 'Brytiago', 'No Doubt', 'Jory Boy',
-  'Rico Ace', 'Chrystal', 'Chris Isaak', 'Seeb', 'MAGIC!',
-  'Zendaya', 'Haze', 'Nate Ruess', 'COLORS', 'Rammstein',
-  'Eric Clapton', 'Sheila On 7', 'WW', 'Indila', 'Portugal. The Man',
-  'Edgardo Nunez', 'King Von', 'Simone Mendes', 'Hanumankind', 'Soda Stereo',
-  'Haddaway', 'Gnarls Barkley', 'Flo Milli', 'Dalex', 'Raj Shekhar',
-  'John Lennon', 'James Blunt', 'Tego Calderon', 'Hans Zimmer', 'Surf Curse',
-  'Pablo Alboran', '6ix9ine', 'Jose Jose', 'Tulus', 'Boza',
-  'Aitana', 'Arash', 'Thaman S', 'Paul McCartney', 'MC Nito',
-  'Los Tucanes De Tijuana', 'Bad Gyal', 'G. V. Prakash', 'Modern Talking', 'Hoobastank',
-  'Laura Pausini', 'New West', 'Lunay', 'Cher', 'Rod Stewart',
-  'NATTAN', 'Riley Green', 'Ankit Tiwari', 'MC Tuto', 'Oruam',
-  'Leon Bridges', 'Shafqat Amanat Ali', 'Cazzu', 'Busta Rhymes', '6LACK',
-  'Sal Priadi', 'Van Halen', 'Sublime', 'NSYNC', 'Frankie Valli',
-  'KALEO', 'OMI', 'KHEA', 'Jessie Murph', 'Jack Johnson',
-  'Jaideep Sahni', 'Diego Victor Hugo', 'Tokischa', 'Mario', 'Korn',
-  'Em Beihold', 'Morad', 'Randy Nota Loca', 'Spice Girls', 'Panda',
-  'Thomas Rhett', 'Virlan Garcia', 'ATL Jacob', 'Nikhita Gandhi', 'Kushagra',
-  'Olivia Newton-John', 'The Stranglers', '070 Shake', 'MNEK', 'Johnny Cash',
-  'Murilo Huff', 'Bailey Zimmerman', 'Jhené Aiko', 'MC GP', 'Snow Patrol',
-  'The Ronettes', 'LUDMILLA', 'Nio Garcia', 'The Animals', 'Nadin Amizah',
-  'ATLXS', 'Sixpence None The Richer', 'John Summit', '4 Non Blondes', 'Shubh',
-  'Thundercat', 'Galantis', 'j-hope', 'Clave Especial', 'Javed Akhtar',
-  'Altamash Faridi', 'Cristian Castro', 'Phoebe Bridgers', 'Quavo', 'Rekha Bhardwaj',
-  'MC IG', 'Jawad Ahmad', 'Skillet', 'MEDUZA', 'Ciara',
-  'Nakama', 'Ilaiyaraaja', 'ILLENIUM', 'boa', 'DFZM',
-  'Shashaa Tirupati', 'Luan Santana', 'Saaheal', 'David Kushner', 'Kim Petras',
-  'Young Cister', 'Haricharan', 'Micro TDH', 'RUFUS DU SOL', 'Kany Garcia',
-  'Jeff Buckley', 'Chuyin', 'Santa Fe Klan', 'John Martin', 'Normani',
-  'Nakash Aziz', 'Willy William', 'Adam Port', 't.A.T.u', 'Cardenales De Nuevo Leon',
-  'Gael Valenzuela', 'Camila', 'Hombres G', 'Jay Sean', 'Marc Segui',
-  'Clementine Douglas', 'NOTION', 'Tammi Terrell', 'Nanpa Basico', 'Leo Foguete',
-  'Avenged Sevenfold', 'Omah Lay', 'Alice In Chains', 'Daecolm', 'Ram Sampath',
-  'The Outfield', 'LMFAO', 'Natalia Lafourcade', 'SYML', 'MOLIY',
-  'Lil Tjay', 'Shenseea', 'Brooks Dunn', 'Chicago', 'Bharath',
-  'Tommy Richman', 'Gigi DAgostino', 'Lionel Richie', 'Cup of Joe', 'MO',
-  'Zé Neto Cristiano', 'Men At Work', 'La Factoria', 'Passenger', 'Juan Magan',
-  'oskar med k', 'Pol Granch', 'Harshdeep Kaur', 'Anuradha Paudwal', 'Rudimental',
-  'James Hype', 'Vijay Prakash', 'Maren Morris', 'Montell Fish', 'Sai Abhyankkar',
-  'Priya Saraiya', 'Kenny Rogers', 'Eddy Lover', 'Counting Crows', 'Cartel De Santa',
-  'Luny Tunes', 'Mc Negão Original', 'Cody Johnson', 'Diana Ross', 'R3HAB',
-  'Naresh Iyer', 'Strawberry Guy', 'Sam Fender', '.Feast', 'Laxmikant-Pyarelal',
-  'MC Jvila', 'Ian Asher', 'INNA', 'Clams Casino', 'Neeraj Shridhar',
-  'Jason Aldean', 'Banda El Recodo', 'Keinemusik', 'Lily Allen', 'Moneybagg Yo',
-  'Hades66', 'Phantogram', 'Manan Bhardwaj', 'Miranda!', 'C. Tangana',
-  'JC Reyes', 'LANY', 'YUNGBLUD', 'Felipe Amorim', 'MJ Records',
-  'The Beach Boys', 'Masoom Sharma', 'Wham!', 'Skillibeng', 'Jorja Smith',
-  'Nusrat Fateh Ali Khan', 'Chezile', 'Eyedress', 'George Ezra', 'DNCE',
-  'The Mamas The Papas', 'Russ', 'Aretha Franklin', 'Edward Maya', 'Pet Shop Boys',
-  'Antara Mitra', 'Belinda', 'SAIKO', 'Stray Kids', 'Sohail Sen',
-  'Jere Klein', 'Chris Grey', 'Tina Turner', 'Patrick Watson', 'MC LUUKY',
-  'Bappi Lahiri', 'Meet Bros.', 'Lloyd', '$uicideboy$', 'DMX',
-  'Axwell', 'Siddharth Garima', 'DJ Oreia', 'Mika Singh', 'DENNIS',
-  'Flume', 'Dhanush', 'Lyodra', 'Chris Jedi', 'Turma do Pagode',
-  'Tyler Childers', 'Hugo Guilherme', 'Shweta Mohan', 'Dermot Kennedy', 'Richy Mitch',
-  'Zac Efron', 'The Doors', 'Malachiii', 'Javed Bashir', 'For Revenge',
-  'Blur', 'Selena', 'Birdy', 'Disciples', 'The All-American Rejects',
-  'Gerardo Ortiz', 'Arslan Nizami', 'Brray', 'Arko', 'Jasiel Nunez',
-  'Jon', 'Rascal Flatts', 'Zoé', 'Naresh Kamath', 'Luke Bryan',
-  'Dhanda Nyoliwala', 'Marilia Mendonca', 'Omar Apollo', 'Franz Ferdinand', 'Megan Moroney',
-  'Leona Lewis', 'Zé Felipe', 'Rage Against The Machine', 'Ray Charles', 'Casper Magico',
-  'Timmy Trumpet', 'Bleachers', 'Modjo', 'Paresh Kamath', 'Jon Alvarez',
-  'Jon Pardi', 'Motley Crue', 'Bazzi', 'Majid Jordan', 'MK',
-  'Frankie Ruiz', 'Nejo', 'Luisa Sonza', 'DJ Javi26', 'Kenshi Yonezu',
-  '24kGoldn', 'Kungs', 'Natanzinho Lima', 'YNW Melly', 'Owl City',
-  'NDS', 'Sevdaliza', 'D-Block Europe', 'A$AP Ferg', 'YS',
-  'Lyanno', 'Heart', 'Elevation Worship', 'Lady A', 'Virgoun',
-  'Miguel Bose', 'NAV', 'The Hollies', 'Stryv', 'Kansas',
-  'Of Monsters and Men', 'Emmanuel Cortes', 'Chord Overstreet', 'Zevia', 'Foushee',
-  'Rich Brian', 'Coi Leray', 'Giveon', 'Yung Gravy', 'Stephen Sanchez',
-  'Angus Julia Stone', 'Ruel', 'Clairo', 'Wallows', 'Owl City',
-  'Phoebe Buffay', 'A Great Big World', 'Tash Sultana', 'Girl in Red',
-  'Montaigne', 'Baker Boy', 'Pentatonix', 'Cimorelli', 'Sami Yusuf',
-  'Maher Zain', 'Mohamed Hamaki', 'Amr Diab', 'Tamer Hosny', 'Mohamed Ramadan',
-  'Wegz', 'Marwan Moussa', 'Moe Shop', 'Ado', 'YOASOBI',
-  'Iruma', 'Radwimps', 'KANA-BOON', 'LiSA', 'Official HIGE DANdism',
-  'Mrs. GREEN APPLE', 'SEVENTEEN', 'IVE', 'NMIXX', 'aespa',
-  'NCT', 'ENHYPEN', 'TREASURE', 'Red Velvet', 'ITZY',
-  'GI-DLE', 'LOONA', 'APink', 'GFRIEND', 'BoA',
-  'TVXQ', 'Super Junior', 'SHINee', 'EXO', 'GOT7',
-  'MONSTA X', 'TXT', 'ATEEZ', 'Joel Corry', 'Riton',
 ];
 
 const MAX_DEPTH = 2;
@@ -289,21 +52,29 @@ const DEPTH2_SPLITS_PER_DEPTH1 = 3; // total depth2 workers = 9
 
 const ARTIST_WORKERS = 12;
 const MAX_BROWSERS = 10;
-const PARALLEL_PER_BROWSER = 5;
+const PARALLEL_PER_BROWSER = 2; // lowered for stability/rate-limit mitigation
 const TOTAL_TASK_LOOPS = MAX_BROWSERS * PARALLEL_PER_BROWSER;
 
-const MAX_QUEUE_SIZE = 10000;
+const MAX_QUEUE_SIZE = 50;
 const MAX_TRACKS_PER_ITEM = 500;
 const MAX_SUBPAGES_PER_ARTIST = 1;
-const PAGE_TIMEOUT = 45000; // increased for better completeness
+const PAGE_TIMEOUT = 45000;
 const DELAY_BETWEEN_PAGES = 120;
 const HEARTBEAT_MS = 30000;
+const NAV_RETRY_BACKOFF_MS = 1200;
+
+// throttle detection / handoff
+const THROTTLE_WINDOW_SIZE = 60;
+const THROTTLE_FAIL_THRESHOLD = 0.75;
+const THROTTLE_MIN_ATTEMPTS = 30;
+const THROTTLE_REQUEUE_EXIT_CODE = 85;
 
 const ROOT_DIR = __dirname;
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const WORKFLOW_DIR = path.join(DATA_DIR, 'workflows');
 const OUTPUT_DIR = path.join(DATA_DIR, 'outputs');
 const LOG_DIR = path.join(DATA_DIR, 'logs');
+const REQUEUE_DIR = path.join(DATA_DIR, 'requeue');
 
 const args = process.argv.slice(2);
 const MODE = getArg('--mode') || 'orchestrator';
@@ -316,7 +87,7 @@ function getArg(flag) {
   return i >= 0 ? (args[i + 1] || null) : null;
 }
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
-function ensureDataDirs() { [DATA_DIR, WORKFLOW_DIR, OUTPUT_DIR, LOG_DIR].forEach(ensureDir); }
+function ensureDataDirs() { [DATA_DIR, WORKFLOW_DIR, OUTPUT_DIR, LOG_DIR, REQUEUE_DIR].forEach(ensureDir); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function generateId(url) {
@@ -343,6 +114,12 @@ function detectType(url = '') {
   if (u.includes('/chart/')) return 'chart';
   if (u.includes('/radio') || u.includes('/station/')) return 'radio';
   if (u.includes('/room/')) return 'room';
+  return 'other';
+}
+function classifyUrl(url = '') {
+  if (url.includes('/album/')) return 'album';
+  if (url.includes('/artist/')) return 'artist';
+  if (url.includes('/playlist/')) return 'playlist';
   return 'other';
 }
 function splitArray(arr, parts) {
@@ -382,6 +159,7 @@ function isAppleMusicSubtitle(subtitle = '') {
   return subtitle.toLowerCase().includes('apple music');
 }
 function shouldKeepPage(type, subtitle) {
+  // strict rule requested earlier
   return type === 'artist' || isAppleMusicSubtitle(subtitle || '');
 }
 
@@ -397,18 +175,52 @@ function startHeartbeat(label, getSnapshot) {
   return () => clearInterval(timer);
 }
 
+function createThrottleTracker() {
+  const results = []; // true=success, false=fail
+  return {
+    record(ok) {
+      results.push(!!ok);
+      if (results.length > THROTTLE_WINDOW_SIZE) results.shift();
+    },
+    score() {
+      if (!results.length) return { attempts: 0, failRate: 0 };
+      const fails = results.filter(x => !x).length;
+      return { attempts: results.length, failRate: fails / results.length };
+    },
+    isThrottled(globalAttempts) {
+      const { attempts, failRate } = this.score();
+      if (globalAttempts < THROTTLE_MIN_ATTEMPTS) return false;
+      if (attempts < Math.min(THROTTLE_WINDOW_SIZE, 20)) return false;
+      return failRate >= THROTTLE_FAIL_THRESHOLD;
+    },
+  };
+}
+
 async function safeGoto(page, url, timeout = PAGE_TIMEOUT) {
+  const kind = classifyUrl(url);
+
+  // attempt 1: fast
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-    return true;
-  } catch {
-    try {
-      await page.goto(url, { waitUntil: 'load', timeout: timeout + 20000 });
-      return true;
-    } catch (e2) {
-      console.error(`safeGoto failed ${url}: ${e2.message}`);
-      return false;
+    if (String(page.url()).startsWith('chrome-error://')) throw new Error('chrome-error-page');
+    return { ok: true, reason: 'ok-domcontentloaded' };
+  } catch (e1) {
+    // album no-retry rule
+    if (kind === 'album') {
+      console.error(`safeGoto failed ${url}: ${e1.message} (album no-retry)`);
+      return { ok: false, reason: 'album-no-retry-fail' };
     }
+  }
+
+  // attempt 2: fallback for non-album
+  await page.waitForTimeout(NAV_RETRY_BACKOFF_MS + Math.floor(Math.random() * 800));
+  try {
+    await page.goto(url, { waitUntil: 'load', timeout: timeout + 10000 });
+    if (String(page.url()).startsWith('chrome-error://')) throw new Error('chrome-error-page');
+    return { ok: true, reason: 'ok-load-fallback' };
+  } catch (e2) {
+    console.error(`safeGoto failed ${url}: ${e2.message}`);
+    return { ok: false, reason: 'fallback-fail' };
   }
 }
 
@@ -420,21 +232,19 @@ async function scrollUntilExhausted(page, direction = 'vertical') {
     let same = 0;
 
     for (let i = 0; i < max; i++) {
-      if (dir === 'vertical') {
-        window.scrollBy(0, 900);
-      } else {
+      if (dir === 'vertical') window.scrollBy(0, 900);
+      else {
         const containers = document.querySelectorAll('[style*="overflow-x"], .shelf-grid, [class*="carousel"]');
         for (const c of containers) c.scrollBy({ left: 450, behavior: 'smooth' });
         window.scrollBy({ left: 450, top: 0, behavior: 'smooth' });
       }
+
       await new Promise(r => setTimeout(r, delay));
       const cur = dir === 'vertical' ? window.scrollY : window.scrollX;
       if (cur === last) {
         same++;
         if (same >= 3) break;
-      } else {
-        same = 0;
-      }
+      } else same = 0;
       last = cur;
     }
 
@@ -484,9 +294,7 @@ async function extractLinksSectionsAndTracks(page) {
     for (const sec of sectionEls) {
       const name = sec.querySelector('h2, h3, [class*="title"]')?.textContent?.trim() || 'Section';
       const items = [];
-      const itemLinks = sec.querySelectorAll(
-        'a[href*="/album/"],a[href*="/playlist/"],a[href*="/artist/"],a[href*="/chart/"],a[href*="/room/"]'
-      );
+      const itemLinks = sec.querySelectorAll('a[href*="/album/"],a[href*="/playlist/"],a[href*="/artist/"],a[href*="/chart/"],a[href*="/room/"]');
       for (const l of itemLinks) {
         const u = l.href?.split('?')[0]?.split('#')[0];
         if (!u || !u.includes('music.apple.com')) continue;
@@ -497,9 +305,7 @@ async function extractLinksSectionsAndTracks(page) {
 
     const featSections = document.querySelectorAll('[data-testid="section-container"][aria-label="Featured"]');
     for (const sec of featSections) {
-      const cards = sec.querySelectorAll(
-        '[class*="lockup"], a[href*="/playlist/"], a[href*="/album/"], a[href*="/chart/"], a[href*="/room/"]'
-      );
+      const cards = sec.querySelectorAll('[class*="lockup"], a[href*="/playlist/"], a[href*="/album/"], a[href*="/chart/"], a[href*="/room/"]');
       for (const c of cards) {
         const linkEl = c.tagName === 'A' ? c : c.querySelector('a[href]');
         const raw = linkEl?.href || '';
@@ -509,9 +315,7 @@ async function extractLinksSectionsAndTracks(page) {
         const subtitle = c.querySelector('[class*="headings__subtitles"]')?.textContent?.trim() || '';
         const metadata = c.querySelector('[class*="headings__metadata-bottom"]')?.textContent?.trim() || '';
         const description = c.querySelector('[class*="description"]')?.textContent?.trim() || '';
-        if (title && url) {
-          r.featuredItems.push({ name: title, url, type: typeOf(url), creator: subtitle, metadata, description });
-        }
+        if (title && url) r.featuredItems.push({ name: title, url, type: typeOf(url), creator: subtitle, metadata, description });
       }
     }
 
@@ -519,10 +323,7 @@ async function extractLinksSectionsAndTracks(page) {
     let trackEls = [];
     for (const s of selectors) {
       const f = document.querySelectorAll(s);
-      if (f.length) {
-        trackEls = Array.from(f);
-        break;
-      }
+      if (f.length) { trackEls = Array.from(f); break; }
     }
     if (!trackEls.length) trackEls = Array.from(document.querySelectorAll('a[href*="/song/"]'));
 
@@ -537,11 +338,7 @@ async function extractLinksSectionsAndTracks(page) {
       if (!url || seen.has(url)) return;
       seen.add(url);
 
-      const name = (
-        el.querySelector('[class*="title"],[class*="name"]')?.textContent?.trim() ||
-        el.textContent?.trim() ||
-        ''
-      ).substring(0, 200);
+      const name = (el.querySelector('[class*="title"],[class*="name"]')?.textContent?.trim() || el.textContent?.trim() || '').substring(0, 200);
       if (!name) return;
 
       r.tracks.push({
@@ -571,22 +368,35 @@ async function extractLinksSectionsAndTracks(page) {
 
 async function crawlPage(page, url) {
   try {
-    const ok = await safeGoto(page, url);
-    if (!ok) {
+    const nav = await safeGoto(page, url);
+    if (!nav.ok) {
       return {
         links: [], sections: [], tracks: [], featuredItems: [],
         pageTitle: '', pageSubtitle: '', pageMetadata: '', pageDescription: '',
+        navOk: false, navReason: nav.reason,
       };
     }
 
+    if (String(page.url()).startsWith('chrome-error://')) {
+      return {
+        links: [], sections: [], tracks: [], featuredItems: [],
+        pageTitle: '', pageSubtitle: '', pageMetadata: '', pageDescription: '',
+        navOk: false, navReason: 'chrome-error-page',
+      };
+    }
+
+    await page.waitForTimeout(1200); // settle dynamic content
     await scrollUntilExhausted(page, 'vertical');
     await scrollUntilExhausted(page, 'horizontal');
-    return await extractLinksSectionsAndTracks(page);
+
+    const data = await extractLinksSectionsAndTracks(page);
+    return { ...data, navOk: true, navReason: nav.reason };
   } catch (e) {
     console.error(`Error crawling ${url}: ${e.message}`);
     return {
       links: [], sections: [], tracks: [], featuredItems: [],
       pageTitle: '', pageSubtitle: '', pageMetadata: '', pageDescription: '',
+      navOk: false, navReason: 'crawl-exception',
     };
   }
 }
@@ -606,11 +416,15 @@ async function closeBrowserPool(pool) {
 
 async function processPageTask(task, browser, state) {
   const { url, depth } = task;
-  if (!url || state.visited.has(url)) return { processed: false, links: [], tracksCount: 0, subtitle: '', depth };
+  if (!url || state.visited.has(url)) {
+    return { processed: false, links: [], tracksCount: 0, subtitle: '', depth, navOk: true };
+  }
   state.visited.add(url);
 
   const t = detectType(url);
-  if (t === 'song' || t === 'radio') return { processed: false, links: [], tracksCount: 0, subtitle: '', depth };
+  if (t === 'song' || t === 'radio') {
+    return { processed: false, links: [], tracksCount: 0, subtitle: '', depth, navOk: true };
+  }
 
   const page = await browser.newPage();
   try {
@@ -618,7 +432,7 @@ async function processPageTask(task, browser, state) {
     const subtitle = x.pageSubtitle || '';
     const isAllowed = shouldKeepPage(t, subtitle);
 
-    if (isAllowed && (x.tracks.length || x.featuredItems.length || x.sections.length)) {
+    if (x.navOk && isAllowed && (x.tracks.length || x.featuredItems.length || x.sections.length)) {
       state.itemsByUrl.set(url, normalizeOutputItem({
         name: x.pageTitle || url.split('/').pop() || 'Unknown',
         url,
@@ -634,7 +448,7 @@ async function processPageTask(task, browser, state) {
 
     const allowedChildTypes = new Set(['artist', 'album', 'single', 'playlist', 'chart', 'room']);
     const newLinks = [];
-    if (depth < MAX_DEPTH) {
+    if (x.navOk && depth < MAX_DEPTH) {
       for (const l of x.links || []) {
         if (state.visited.has(l)) continue;
         const lt = detectType(l);
@@ -649,6 +463,8 @@ async function processPageTask(task, browser, state) {
       tracksCount: (x.tracks || []).length,
       subtitle,
       depth,
+      navOk: x.navOk,
+      navReason: x.navReason || '',
     };
   } finally {
     await page.close();
@@ -658,6 +474,10 @@ async function processPageTask(task, browser, state) {
 async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
   const queue = [...initialQueue];
   let pageCount = 0;
+  let globalAttempts = 0;
+  let throttled = false;
+
+  const throttleTracker = createThrottleTracker();
 
   let queueLock = Promise.resolve();
   async function takeTask() {
@@ -675,15 +495,22 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
   let batchDepth = null;
   const batchSubtitles = new Set();
 
-  const stopHeartbeat = startHeartbeat(`crawl:${workerLabel}`, () => ({
-    pageCount,
-    queue: queue.length,
-    maxQueue: MAX_QUEUE_SIZE,
-    items: state.itemsByUrl.size,
-    batchProcessed,
-    batchTracks,
-    batchDepth: batchDepth ?? null,
-  }));
+  const stopHeartbeat = startHeartbeat(`crawl:${workerLabel}`, () => {
+    const sc = throttleTracker.score();
+    return {
+      pageCount,
+      queue: queue.length,
+      maxQueue: MAX_QUEUE_SIZE,
+      items: state.itemsByUrl.size,
+      batchProcessed,
+      batchTracks,
+      batchDepth: batchDepth ?? null,
+      throttleAttemptsWindow: sc.attempts,
+      throttleFailRateWindow: Number(sc.failRate.toFixed(3)),
+      globalAttempts,
+      throttled,
+    };
+  });
 
   async function addMetrics(result) {
     await (metricLock = metricLock.then(() => {
@@ -703,9 +530,10 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
       const allTotalTracks = items.reduce((sum, item) => sum + (item.tracks?.length || 0), 0);
       const subtitles = [...batchSubtitles].join(', ') || 'N/A';
       const depthForLog = batchDepth ?? '?';
+      const sc = throttleTracker.score();
 
       console.log(
-        `Pages Crawled: ${pageCount} | Depth: ${depthForLog}/${MAX_DEPTH} | Processed Pages: ${batchProcessed} | Total Processed Pages: ${pageCount} | Queue: ${queue.length}/${MAX_QUEUE_SIZE} | Items: ${items.length} | Tracks from Batch: ${batchTracks} | All Total Tracks: ${allTotalTracks} | Subtitle of Batch: ${subtitles}`
+        `[${workerLabel}] Pages Crawled: ${pageCount} | Depth: ${depthForLog}/${MAX_DEPTH} | Processed Pages: ${batchProcessed} | Total Processed Pages: ${pageCount} | Queue: ${queue.length}/${MAX_QUEUE_SIZE} | Items: ${items.length} | Tracks from Batch: ${batchTracks} | All Total Tracks: ${allTotalTracks} | Subtitle of Batch: ${subtitles} | ThrottleFailRateWindow: ${sc.failRate.toFixed(2)}`
       );
 
       batchProcessed = 0;
@@ -718,6 +546,7 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
   async function loop(browserIndex) {
     const browser = browsers[browserIndex];
     while (true) {
+      if (throttled) break;
       const task = await takeTask();
       if (!task) break;
 
@@ -725,13 +554,21 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
         const r = await processPageTask(task, browser, state);
         if (r.processed) pageCount += 1;
 
+        globalAttempts += 1;
+        throttleTracker.record(!!r.navOk);
+
         for (const nl of r.links || []) {
           if (!state.visited.has(nl.url) && queue.length < MAX_QUEUE_SIZE) queue.push(nl);
         }
 
         await addMetrics(r);
-        if (pageCount > 0 && pageCount % 10 === 0) {
-          await flushMetrics(false);
+        if (pageCount > 0 && pageCount % 10 === 0) await flushMetrics(false);
+
+        if (throttleTracker.isThrottled(globalAttempts) && queue.length > 0) {
+          throttled = true;
+          const sc = throttleTracker.score();
+          console.error(`[${workerLabel}] THROTTLED detected. failRate=${sc.failRate.toFixed(3)} attemptsWindow=${sc.attempts} globalAttempts=${globalAttempts}. Will requeue remaining ${queue.length} tasks.`);
+          break;
         }
       } catch (e) {
         console.error(`[${workerLabel}] task error: ${e.message}`);
@@ -748,13 +585,24 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
 
   await flushMetrics(true);
   stopHeartbeat();
+
+  return {
+    throttled,
+    remainingQueue: queue,
+    stats: {
+      pageCount,
+      items: state.itemsByUrl.size,
+      globalAttempts,
+      throttle: throttleTracker.score(),
+    },
+  };
 }
 
 async function findArtistUrl(browser, artistName) {
   const page = await browser.newPage();
   try {
-    const ok = await safeGoto(page, `https://music.apple.com/us/search?term=${encodeURIComponent(artistName)}`);
-    if (!ok) return null;
+    const nav = await safeGoto(page, `https://music.apple.com/us/search?term=${encodeURIComponent(artistName)}`);
+    if (!nav.ok) return null;
 
     await scrollUntilExhausted(page, 'vertical');
 
@@ -789,9 +637,10 @@ async function processArtistPage(browser, artistName, artistUrl, visited) {
   };
 
   try {
-    const ok = await safeGoto(page, artistUrl);
-    if (!ok) return artistData;
+    const nav = await safeGoto(page, artistUrl);
+    if (!nav.ok) return artistData;
 
+    await page.waitForTimeout(1200);
     await scrollUntilExhausted(page, 'vertical');
     await scrollUntilExhausted(page, 'horizontal');
 
@@ -815,9 +664,10 @@ async function processArtistPage(browser, artistName, artistUrl, visited) {
     for (const subUrl of toProcess) {
       const sp = await browser.newPage();
       try {
-        const subOk = await safeGoto(sp, subUrl);
-        if (!subOk) continue;
+        const subNav = await safeGoto(sp, subUrl);
+        if (!subNav.ok) continue;
 
+        await sp.waitForTimeout(900);
         await scrollUntilExhausted(sp, 'vertical');
 
         const sd = await extractLinksSectionsAndTracks(sp);
@@ -852,13 +702,13 @@ async function processArtistPage(browser, artistName, artistUrl, visited) {
 
 function workflowPath(name) { return path.join(WORKFLOW_DIR, name); }
 function outputPath(name) { return path.join(OUTPUT_DIR, name); }
+function requeuePath(name) { return path.join(REQUEUE_DIR, name); }
 
 function writeWorkflow(name, payload) {
   const file = workflowPath(name);
   saveJson(file, payload);
   return file;
 }
-
 function writeOutput(name, items, meta = {}) {
   const unique = dedupeByUrl(items);
   const normalized = unique.map(normalizeOutputItem);
@@ -874,6 +724,17 @@ function writeOutput(name, items, meta = {}) {
   saveJson(file, payload);
   return file;
 }
+function writeRequeue(workerLabel, queue, wf, stats) {
+  const file = requeuePath(`${workerLabel}-requeue.json`);
+  saveJson(file, {
+    createdAt: new Date().toISOString(),
+    workerId: workerLabel,
+    originalWorkflow: wf,
+    remainingQueue: dedupeByUrl(queue || []),
+    stats,
+  });
+  return file;
+}
 
 async function runWorker(workflowFile) {
   ensureDataDirs();
@@ -883,10 +744,7 @@ async function runWorker(workflowFile) {
 
   const workerLabel = wf.workerId || path.basename(workflowFile);
   const state = { visited: new Set(wf.visited || []), itemsByUrl: new Map() };
-
-  for (const si of wf.seedItems || []) {
-    if (si?.url) state.itemsByUrl.set(si.url, normalizeOutputItem(si));
-  }
+  for (const si of wf.seedItems || []) if (si?.url) state.itemsByUrl.set(si.url, normalizeOutputItem(si));
 
   const stopHeartbeat = startHeartbeat(`worker:${workerLabel}`, () => ({
     kind: wf.kind,
@@ -896,11 +754,20 @@ async function runWorker(workflowFile) {
   }));
 
   const pool = await createBrowserPool();
+  let throttledExit = false;
+  let throttleResult = null;
+
   try {
     if (wf.kind === 'crawl') {
-      await runQueueWithPool(wf.queue || [], state, pool, workerLabel);
+      throttleResult = await runQueueWithPool(wf.queue || [], state, pool, workerLabel);
 
-      if (wf.includeMandatoryArtists) {
+      if (throttleResult.throttled) {
+        const rq = writeRequeue(workerLabel, throttleResult.remainingQueue, wf, throttleResult.stats);
+        console.error(`[${workerLabel}] wrote requeue file -> ${rq}`);
+        throttledExit = true;
+      }
+
+      if (!throttledExit && wf.includeMandatoryArtists) {
         const b = pool[0];
         for (const a of MANDATORY_ARTISTS) {
           const ad = await processArtistPage(b, a.name, a.url, state.visited);
@@ -949,23 +816,26 @@ async function runWorker(workflowFile) {
     workerId: workerLabel,
     kind: wf.kind,
     depth: wf.depth || null,
+    throttled: throttledExit,
+    throttleStats: throttleResult?.stats || null,
   });
 
-  if (wf.emitNextDepthLinksFile) {
+  if (!throttledExit && wf.emitNextDepthLinksFile) {
     const next = [];
     for (const it of items) {
       for (const sec of it.sections || []) {
         for (const si of sec.items || []) {
           const t = detectType(si.url);
           if (['artist', 'album', 'single', 'playlist', 'chart', 'room'].includes(t)) {
-            next.push({ url: si.url, depth: (wf.depth || 1) + 1 });
+            // emit clamped depth so depth2 stays depth2 targets
+            next.push({ url: si.url, depth: Math.min(MAX_DEPTH, 2) });
           }
         }
       }
       for (const fi of it.featuredItems || []) {
         const t = detectType(fi.url);
         if (['artist', 'album', 'single', 'playlist', 'chart', 'room'].includes(t)) {
-          next.push({ url: fi.url, depth: (wf.depth || 1) + 1 });
+          next.push({ url: fi.url, depth: Math.min(MAX_DEPTH, 2) });
         }
       }
     }
@@ -977,6 +847,11 @@ async function runWorker(workflowFile) {
   }
 
   console.log(`[${workerLabel}] done -> ${outFile}`);
+
+  if (throttledExit) {
+    process.exit(THROTTLE_REQUEUE_EXIT_CODE);
+  }
+
   return outFile;
 }
 
@@ -1009,7 +884,7 @@ function spawnNode(childArgs, logFile) {
 
     child.on('close', (code) => {
       log.end();
-      if (code === 0) resolve();
+      if (code === 0 || code === THROTTLE_REQUEUE_EXIT_CODE) resolve({ code });
       else reject(new Error(`Child failed (${code}): ${childArgs.join(' ')}`));
     });
   });
@@ -1030,8 +905,7 @@ async function runMerge(inputGlob, outFile) {
       else {
         const cur = byUrl.get(n.url);
         byUrl.set(n.url, {
-          ...cur,
-          ...n,
+          ...cur, ...n,
           tracks: (n.tracks.length > cur.tracks.length) ? n.tracks : cur.tracks,
           sections: (n.sections.length > cur.sections.length) ? n.sections : cur.sections,
           featuredItems: (n.featuredItems.length > cur.featuredItems.length) ? n.featuredItems : cur.featuredItems,
@@ -1052,10 +926,33 @@ async function runMerge(inputGlob, outFile) {
     items,
     sourceFiles: files.map(f => path.basename(f)),
   };
-
   saveJson(outFile, merged);
   console.log(`[merge] ${files.length} files -> ${outFile} (${items.length} items)`);
   return merged;
+}
+
+function buildRequeueWorkflows() {
+  const files = glob.sync(path.join(REQUEUE_DIR, '*-requeue.json'));
+  const workflows = [];
+
+  for (const f of files) {
+    const rq = loadJson(f, null);
+    if (!rq?.remainingQueue?.length) continue;
+
+    const wid = `${rq.workerId}-retry-${Date.now()}`;
+    const wfName = `${wid}.json`;
+    const outName = `${wid}.json`;
+
+    workflows.push(writeWorkflow(wfName, {
+      kind: 'crawl',
+      phase: 'requeue',
+      workerId: wid,
+      depth: 2,
+      queue: rq.remainingQueue.map(x => ({ url: x.url, depth: 2 })),
+      outputName: outName,
+    }));
+  }
+  return workflows;
 }
 
 async function runOrchestrator() {
@@ -1064,18 +961,18 @@ async function runOrchestrator() {
   console.log('========================================');
   console.log('Apple Music Orchestrator');
   console.log(`Per worker: ${MAX_BROWSERS} browsers, ${PARALLEL_PER_BROWSER} per browser (${TOTAL_TASK_LOOPS} loops)`);
-  console.log('Flow: 3x depth1 -> 9x depth2 -> merge -> artist workers -> final merge');
+  console.log('Flow: 3x depth1 -> 9x depth2 -> requeue retries -> merge -> artist workers -> final merge');
   console.log('========================================');
 
   const totalWorkers = DEPTH1_SPLITS + (DEPTH1_SPLITS * DEPTH2_SPLITS_PER_DEPTH1) + ARTIST_WORKERS;
-  const orchestratorState = { stage: 'starting', completedWorkers: 0, totalWorkers };
+  const orchestratorState = { stage: 'starting', completedWorkers: 0, totalWorkers, requeueWorkers: 0 };
   const stopHeartbeat = startHeartbeat('orchestrator', () => orchestratorState);
 
-  // Stage 1: Depth 1 (3 workers)
+  // 1) Depth1
   orchestratorState.stage = 'depth1';
   const seedSplits = splitArray(SEED_URLS.map(url => ({ url, depth: 1 })), DEPTH1_SPLITS);
-
   const d1wfs = [];
+
   for (let i = 0; i < DEPTH1_SPLITS; i++) {
     d1wfs.push(writeWorkflow(`depth1-w${i + 1}.json`, {
       kind: 'crawl',
@@ -1089,19 +986,17 @@ async function runOrchestrator() {
     }));
   }
 
-  await Promise.all(
-    d1wfs.map((wf, i) =>
-      spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `depth1-w${i + 1}.log`))
-        .then(() => { orchestratorState.completedWorkers += 1; })
-    )
-  );
+  await Promise.all(d1wfs.map((wf, i) =>
+    spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `depth1-w${i + 1}.log`))
+      .then(() => { orchestratorState.completedWorkers += 1; })
+  ));
 
-  // Stage 2: Depth 2 (9 workers)
+  // 2) Depth2 (9 workers)
   orchestratorState.stage = 'depth2';
   const d2wfs = [];
   for (let i = 0; i < DEPTH1_SPLITS; i++) {
     const d1next = loadJson(workflowPath(`depth1-w${i + 1}-next-links.json`), { links: [] });
-    const d2candidates = dedupeByUrl((d1next.links || []).map(l => ({ url: l.url, depth: 2 })));
+    const d2candidates = dedupeByUrl((d1next.links || []).map(l => ({ url: l.url, depth: 2 })).filter(x => x.url));
     const d2splits = splitArray(d2candidates, DEPTH2_SPLITS_PER_DEPTH1);
 
     for (let j = 0; j < DEPTH2_SPLITS_PER_DEPTH1; j++) {
@@ -1116,23 +1011,40 @@ async function runOrchestrator() {
     }
   }
 
-  await Promise.all(
-    d2wfs.map((wf) => {
+  await Promise.all(d2wfs.map((wf) => {
+    const id = path.basename(wf, '.json');
+    return spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `${id}.log`))
+      .then(() => { orchestratorState.completedWorkers += 1; });
+  }));
+
+  // 2.5) Requeue retry pass (new workers for throttled leftovers)
+  orchestratorState.stage = 'requeue';
+  const rqWorkflows = buildRequeueWorkflows();
+  orchestratorState.requeueWorkers = rqWorkflows.length;
+
+  if (rqWorkflows.length) {
+    console.log(`[orchestrator] requeue workers: ${rqWorkflows.length}`);
+    await Promise.all(rqWorkflows.map((wf) => {
       const id = path.basename(wf, '.json');
       return spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `${id}.log`))
         .then(() => { orchestratorState.completedWorkers += 1; });
-    })
-  );
+    }));
+  }
 
-  // Stage 3: Merge crawl outputs
+  // 3) Merge crawl
   orchestratorState.stage = 'merge-crawl';
   const crawlMergedFile = path.join(DATA_DIR, 'us-crawl-only.json');
   await runMerge(path.join(OUTPUT_DIR, 'us-depth*.json'), crawlMergedFile);
 
-  // Stage 4: Artist workers
+  // include requeue outputs in crawl-only merge as well
+  const requeueMergedFile = path.join(DATA_DIR, 'us-crawl-requeue-only.json');
+  await runMerge(path.join(OUTPUT_DIR, '*retry-*.json'), requeueMergedFile);
+
+  // 4) Artists
   orchestratorState.stage = 'artists';
   const artistSplits = splitArray(TOP_ARTISTS, ARTIST_WORKERS);
   const artistWfs = [];
+
   for (let i = 0; i < ARTIST_WORKERS; i++) {
     artistWfs.push(writeWorkflow(`artists-w${i + 1}.json`, {
       kind: 'artist-batch',
@@ -1143,14 +1055,12 @@ async function runOrchestrator() {
     }));
   }
 
-  await Promise.all(
-    artistWfs.map((wf, i) =>
-      spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `artists-w${i + 1}.log`))
-        .then(() => { orchestratorState.completedWorkers += 1; })
-    )
-  );
+  await Promise.all(artistWfs.map((wf, i) =>
+    spawnNode(['--mode', 'worker', '--workflow', wf], path.join(LOG_DIR, `artists-w${i + 1}.log`))
+      .then(() => { orchestratorState.completedWorkers += 1; })
+  ));
 
-  // Stage 5: Final merge
+  // 5) Final merge
   orchestratorState.stage = 'merge-final';
   await runMerge(path.join(OUTPUT_DIR, '*.json'), FINAL_OUTPUT);
 
