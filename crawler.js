@@ -547,11 +547,11 @@ async function closeBrowserPool(pool) {
 
 async function processPageTask(task, browser, state) {
   const { url, depth } = task;
-  if (!url || state.visited.has(url)) return { processed: false, links: [] };
+  if (!url || state.visited.has(url)) return { processed: false, links: [], tracksCount: 0, subtitle: '', depth };
   state.visited.add(url);
 
   const t = detectType(url);
-  if (t === 'song' || t === 'radio') return { processed: false, links: [] };
+  if (t === 'song' || t === 'radio') return { processed: false, links: [], tracksCount: 0, subtitle: '', depth };
 
   const page = await browser.newPage();
   try {
@@ -583,7 +583,13 @@ async function processPageTask(task, browser, state) {
       }
     }
 
-    return { processed: true, links: dedupeByUrl(newLinks) };
+    return {
+      processed: true,
+      links: dedupeByUrl(newLinks),
+      tracksCount: (x.tracks || []).length,
+      subtitle: x.pageSubtitle || '',
+      depth,
+    };
   } finally {
     await page.close();
   }
@@ -591,22 +597,71 @@ async function processPageTask(task, browser, state) {
 
 async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
   const queue = [...initialQueue];
-  let processed = 0;
+  let pageCount = 0;
+
+  let queueLock = Promise.resolve();
+  async function takeTask() {
+    let task = null;
+    await (queueLock = queueLock.then(() => {
+      if (queue.length > MAX_QUEUE_SIZE) queue.length = MAX_QUEUE_SIZE;
+      task = queue.shift() || null;
+    }));
+    return task;
+  }
+
+  let metricLock = Promise.resolve();
+  let batchProcessed = 0;
+  let batchTracks = 0;
+  let batchDepth = null;
+  const batchSubtitles = new Set();
+
+  async function addMetrics(result) {
+    await (metricLock = metricLock.then(() => {
+      if (batchDepth === null && typeof result.depth === 'number') batchDepth = result.depth;
+      batchProcessed += result.processed ? 1 : 0;
+      batchTracks += result.tracksCount || 0;
+      if (result.subtitle) batchSubtitles.add(result.subtitle);
+    }));
+  }
+
+  async function flushMetrics(force = false) {
+    await (metricLock = metricLock.then(() => {
+      if (!force && batchProcessed < 10) return;
+      if (batchProcessed === 0) return;
+
+      const items = Array.from(state.itemsByUrl.values());
+      const allTotalTracks = items.reduce((sum, item) => sum + (item.tracks?.length || 0), 0);
+      const subtitles = [...batchSubtitles].join(', ') || 'N/A';
+      const depthForLog = batchDepth ?? '?';
+
+      console.log(
+        `Pages Crawled: ${pageCount} | Depth: ${depthForLog}/${MAX_DEPTH} | Processed Pages: ${batchProcessed} | Total Processed Pages: ${pageCount} | Queue: ${queue.length}/${MAX_QUEUE_SIZE} | Items: ${items.length} | Tracks from Batch: ${batchTracks} | All Total Tracks: ${allTotalTracks} | Subtitle of Batch: ${subtitles}`
+      );
+
+      batchProcessed = 0;
+      batchTracks = 0;
+      batchDepth = null;
+      batchSubtitles.clear();
+    }));
+  }
 
   async function loop(browserIndex) {
     const browser = browsers[browserIndex];
     while (true) {
-      const task = queue.shift();
+      const task = await takeTask();
       if (!task) break;
-      if (queue.length > MAX_QUEUE_SIZE) queue.length = MAX_QUEUE_SIZE;
+
       try {
         const r = await processPageTask(task, browser, state);
-        processed += r.processed ? 1 : 0;
+        if (r.processed) pageCount += 1;
+
         for (const nl of r.links || []) {
           if (!state.visited.has(nl.url) && queue.length < MAX_QUEUE_SIZE) queue.push(nl);
         }
-        if (processed % 10 === 0) {
-          console.log(`[${workerLabel}] processed=${processed} queue=${queue.length} items=${state.itemsByUrl.size}`);
+
+        await addMetrics(r);
+        if (pageCount > 0 && pageCount % 10 === 0) {
+          await flushMetrics(false);
         }
       } catch (e) {
         console.error(`[${workerLabel}] task error: ${e.message}`);
@@ -620,6 +675,8 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
     for (let p = 0; p < PARALLEL_PER_BROWSER; p++) loops.push(loop(b));
   }
   await Promise.all(loops);
+
+  await flushMetrics(true);
 }
 
 async function findArtistUrl(browser, artistName) {
