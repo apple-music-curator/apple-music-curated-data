@@ -49,6 +49,7 @@ const TOP_ARTISTS = [
 const MAX_DEPTH = 2;
 const DEPTH1_SPLITS = 3;
 const DEPTH2_SPLITS_PER_DEPTH1 = 3; // total depth2 workers = 9
+const MAX_PAGES_TO_CRAWL = 25; // test cap per crawl worker
 
 const ARTIST_WORKERS = 12;
 const MAX_BROWSERS = 10;
@@ -471,23 +472,41 @@ async function processPageTask(task, browser, state) {
   }
 }
 
-async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
-  const queue = [...initialQueue];
-  let pageCount = 0;
-  let globalAttempts = 0;
-  let throttled = false;
+async function loop(browserIndex) {
+  const browser = browsers[browserIndex];
+  while (true) {
+    if (throttled) break;
+    if (pageCount >= MAX_PAGES_TO_CRAWL) break; // cap
 
-  const throttleTracker = createThrottleTracker();
+    const task = await takeTask();
+    if (!task) break;
 
-  let queueLock = Promise.resolve();
-  async function takeTask() {
-    let task = null;
-    await (queueLock = queueLock.then(() => {
-      if (queue.length > MAX_QUEUE_SIZE) queue.length = MAX_QUEUE_SIZE;
-      task = queue.shift() || null;
-    }));
-    return task;
+    try {
+      const r = await processPageTask(task, browser, state);
+      if (r.processed) pageCount += 1;
+
+      globalAttempts += 1;
+      throttleTracker.record(!!r.navOk);
+
+      for (const nl of r.links || []) {
+        if (!state.visited.has(nl.url) && queue.length < MAX_QUEUE_SIZE) queue.push(nl);
+      }
+
+      await addMetrics(r);
+      if (pageCount > 0 && pageCount % 10 === 0) await flushMetrics(false);
+
+      if (throttleTracker.isThrottled(globalAttempts) && queue.length > 0) {
+        throttled = true;
+        const sc = throttleTracker.score();
+        console.error(`[${workerLabel}] THROTTLED detected. failRate=${sc.failRate.toFixed(3)} attemptsWindow=${sc.attempts} globalAttempts=${globalAttempts}. Will requeue remaining ${queue.length} tasks.`);
+        break;
+      }
+    } catch (e) {
+      console.error(`[${workerLabel}] task error: ${e.message}`);
+    }
+    await sleep(DELAY_BETWEEN_PAGES);
   }
+}
 
   let metricLock = Promise.resolve();
   let batchProcessed = 0;
@@ -502,6 +521,7 @@ async function runQueueWithPool(initialQueue, state, browsers, workerLabel) {
       queue: queue.length,
       maxQueue: MAX_QUEUE_SIZE,
       items: state.itemsByUrl.size,
+      maxPagesToCrawl: MAX_PAGES_TO_CRAWL,
       batchProcessed,
       batchTracks,
       batchDepth: batchDepth ?? null,
